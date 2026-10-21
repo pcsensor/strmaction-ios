@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import Darwin
 
 #if canImport(KSPlayer)
 import KSPlayer
@@ -37,6 +38,10 @@ public final class VideoPlayerController: ObservableObject {
     private weak var boundPiPLayer: KSPlayerLayer?
     #endif
 
+    /// 实际交给播放器的地址。开启“允许自签名证书”时，这会是本机回环代理地址。
+    @Published public private(set) var playbackURL: URL?
+    private var playbackProxySession: InsecurePlaybackSession?
+
     public init() {}
 
     public func setup(url: URL, headers: [String: String], resumeMs: Int64, cacheLimitMb: Int = 128) {
@@ -49,6 +54,21 @@ public final class VideoPlayerController: ObservableObject {
         currentPositionMs = max(0, resumeMs)
         durationMs = 0
         bufferedPositionMs = 0
+
+        // 自签名开关开启时，所有 HTTPS 播放地址都改走本机回环代理，
+        // 让 FFmpeg 和 AVFoundation 都不直接处理远端证书。
+        playbackProxySession?.invalidate()
+        playbackProxySession = nil
+        let resolvedURL: URL
+        if InsecurePlaybackProxy.isEnabled(), url.scheme?.lowercased() == "https",
+           let proxySession = InsecurePlaybackProxy.shared.makeSession(remoteURL: url, headers: headers)
+        {
+            playbackProxySession = proxySession
+            resolvedURL = proxySession.localURL
+        } else {
+            resolvedURL = url
+        }
+        playbackURL = resolvedURL
 
         #if canImport(KSPlayer)
         // 先移除旧图层并重建底层 player layer；仅修改 URL 不会让 KSPlayer 重建播放器。
@@ -82,6 +102,15 @@ public final class VideoPlayerController: ObservableObject {
             options.preferredForwardBufferDuration = min(cacheSeconds, max(3.0, cacheSeconds / 4.0))
         }
 
+        // 回环代理本身是 HTTP，不要再让 FFmpeg 读取系统代理环境变量；
+        // 未启用代理时恢复 KSPlayer 的默认行为。
+        if playbackProxySession != nil {
+            KSOptions.useSystemHTTPProxy = false
+            unsetenv("http_proxy")
+            unsetenv("https_proxy")
+        } else {
+            KSOptions.useSystemHTTPProxy = true
+        }
         KSOptions.firstPlayerType = KSMEPlayer.self
         KSOptions.secondPlayerType = KSAVPlayer.self
         self.setupResumeMs = max(0, resumeMs)
@@ -95,7 +124,7 @@ public final class VideoPlayerController: ObservableObject {
         }
         #else
         // Fallback: 原生 AVPlayer 方案
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let asset = AVURLAsset(url: resolvedURL, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let playerItem = AVPlayerItem(asset: asset)
         let player = AVPlayer(playerItem: playerItem)
         player.volume = Float(volume)
@@ -395,6 +424,9 @@ public final class VideoPlayerController: ObservableObject {
         isReady = false
         isPiPActive = false
         subtitleText = nil
+        playbackProxySession?.invalidate()
+        playbackProxySession = nil
+        playbackURL = nil
         #if canImport(KSPlayer)
         if let layer = ksCoordinator.playerLayer, layer.isPipActive {
             layer.isPipActive = false
@@ -443,8 +475,12 @@ public struct VideoSurfaceView: View {
     public var body: some View {
         #if canImport(KSPlayer)
         if let options = controller.ksOptions {
-            KSPlayerSurfaceView(controller: controller, url: url, options: options)
-                .ignoresSafeArea()
+            KSPlayerSurfaceView(
+                controller: controller,
+                url: controller.playbackURL ?? url,
+                options: options
+            )
+            .ignoresSafeArea()
         } else {
             Color.black.ignoresSafeArea()
         }
