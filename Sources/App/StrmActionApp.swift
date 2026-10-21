@@ -63,6 +63,19 @@ struct StrmActionApp: App {
                 if serverUrl.isEmpty {
                     showSetup = true
                 }
+                setupTokenExpiredHandler()
+            }
+            .onChange(of: serverUrl) { newUrl in
+                bridge.allowedHost = URL(string: newUrl)?.host ?? ""
+            }
+        }
+    }
+
+    private func setupTokenExpiredHandler() {
+        ProgressEngine.shared.onTokenExpired = {
+            DispatchQueue.main.async {
+                self.errorMessage = "播放凭证已过期，请重新进入播放"
+                self.activePlayInfo = nil
             }
         }
     }
@@ -93,13 +106,29 @@ struct StrmActionApp: App {
                     mode: mode
                 )
                 DispatchQueue.main.async {
-                    self.activePlayInfo = response
+                    if mode == "external_mpv" {
+                        self.handleExternalPlay(playInfo: response)
+                    } else {
+                        self.activePlayInfo = response
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.errorMessage = "发起播放失败: \(error.localizedDescription)"
                 }
             }
+        }
+    }
+
+    private func handleExternalPlay(playInfo: PlayResponse) {
+        let encoded = playInfo.playUrl.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? playInfo.playUrl
+        if let url = URL(string: "infuse://x-callback-url/play?url=\(encoded)"), UIApplication.shared.canOpenURL(url) {
+            UIApplication.shared.open(url)
+        } else if let vlc = URL(string: "vlc://\(playInfo.playUrl)"), UIApplication.shared.canOpenURL(vlc) {
+            UIApplication.shared.open(vlc)
+        } else {
+            UIPasteboard.general.string = playInfo.playUrl
+            self.errorMessage = "已将播放直链复制至剪贴板，可粘贴至任意第三方播放器加载。"
         }
     }
 

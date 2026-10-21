@@ -15,20 +15,20 @@ public struct PlayResponse: Codable {
     public let playUrl: String
     public let resumeMs: Int64
     public let durationMs: Int64?
-    public let headers: [String: String]
+    public let headers: [String: String]?
     public let headersHint: String?
     public let playToken: String
     public let playTokenExpiresAt: Double?
-    public let progressIntervalMs: Int64
-    public let cacheLimitMb: Int
-    public let fallbackOnError: Bool
+    public let progressIntervalMs: Int64?
+    public let cacheLimitMb: Int?
+    public let fallbackOnError: Bool?
     public let mediaFileId: Int?
     public let nextItemId: Int?
     public let nextTitle: String?
     public let nextEpisodeCode: String?
-    public let subtitles: [SubtitleEntry]
-    public let playlist: [PlaylistItem]
-    public let currentIndex: Int
+    public let subtitles: [SubtitleEntry]?
+    public let playlist: [PlaylistItem]?
+    public let currentIndex: Int?
 
     enum CodingKeys: String, CodingKey {
         case mode
@@ -59,6 +59,40 @@ public struct PlayResponse: Codable {
         case playlist
         case currentIndex = "current_index"
     }
+
+    // 安全缺省访问器
+    public var safeHeaders: [String: String] {
+        headers ?? [:]
+    }
+
+    public var safePlaylist: [PlaylistItem] {
+        playlist ?? []
+    }
+
+    public var safeSubtitles: [SubtitleEntry] {
+        subtitles ?? []
+    }
+
+    public var safeProgressIntervalMs: Int64 {
+        progressIntervalMs ?? 5000
+    }
+
+    public var safeCacheLimitMb: Int {
+        cacheLimitMb ?? 128
+    }
+
+    /// 组合格式化标题：{系列名称} {季集编号} {单集标题}
+    public var fullDisplayTitle: String {
+        var parts: [String] = []
+        if let sTitle = seriesTitle, !sTitle.isEmpty {
+            parts.append(sTitle)
+        }
+        if let epCode = nextEpisodeCode, !epCode.isEmpty {
+            // 如果自身有对应的当前集号，也可优先使用
+        }
+        parts.append(title)
+        return parts.joined(separator: " ")
+    }
 }
 
 /// 选集列表条目
@@ -68,8 +102,8 @@ public struct PlaylistItem: Codable, Identifiable {
     public let seasonNo: Int?
     public let episodeNo: Int?
     public let code: String?
-    public let watched: Bool
-    public let current: Bool
+    public let watched: Bool?
+    public let current: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -79,6 +113,14 @@ public struct PlaylistItem: Codable, Identifiable {
         case code
         case watched
         case current
+    }
+
+    public var isWatched: Bool {
+        watched ?? false
+    }
+
+    public var isCurrent: Bool {
+        current ?? false
     }
 
     /// 友好展示标签
@@ -95,7 +137,7 @@ public struct PlaylistItem: Codable, Identifiable {
 public struct SubtitleEntry: Codable, Identifiable {
     public var id: String { url }
     public let label: String
-    public let lang: String
+    public let lang: String?
     public let filename: String?
     public let format: String?
     public let mime: String?

@@ -55,8 +55,9 @@ public final class StrmActionBridge: NSObject, WKScriptMessageHandler {
 
         // 安全校验：校验来源 Host
         if let host = message.webView?.url?.host, !allowedHost.isEmpty {
-            if host.caseInsensitiveCompare(allowedHost) != .orderedSame {
-                print("[StrmActionBridge] 消息来源非受信服务器 host: \(host), 期望: \(allowedHost)")
+            let cleanAllowed = allowedHost.components(separatedBy: ":").first ?? allowedHost
+            if host.caseInsensitiveCompare(cleanAllowed) != .orderedSame {
+                print("[StrmActionBridge] 消息来源非受信服务器 host: \(host), 期望: \(cleanAllowed)")
                 return
             }
         }

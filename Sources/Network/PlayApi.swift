@@ -84,7 +84,6 @@ public final class PlayApi {
             }
 
             guard (200...299).contains(http.statusCode) else {
-                // 尝试解析错误提示
                 if let errorObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let errSub = errorObj["error"] as? [String: Any],
                    let msg = errSub["message"] as? String {
@@ -101,5 +100,32 @@ public final class PlayApi {
         } catch {
             throw PlayApiError.networkError(error)
         }
+    }
+
+    /// 下载外挂字幕文本
+    public func fetchSubtitleContent(serverUrl: String, subtitlePath: String) async throws -> String {
+        let fullUrlString: String
+        if subtitlePath.lowercased().hasPrefix("http://") || subtitlePath.lowercased().hasPrefix("https://") {
+            fullUrlString = subtitlePath
+        } else {
+            let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let cleanPath = subtitlePath.hasPrefix("/") ? subtitlePath : "/\(subtitlePath)"
+            fullUrlString = "\(base)\(cleanPath)"
+        }
+
+        guard let url = URL(string: fullUrlString) else {
+            throw PlayApiError.invalidServerUrl
+        }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10.0)
+        request.httpMethod = "GET"
+        request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw PlayApiError.badResponse(statusCode: 0, message: "字幕下载失败")
+        }
+
+        return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
     }
 }

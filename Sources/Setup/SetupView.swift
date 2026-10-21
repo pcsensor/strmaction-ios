@@ -3,12 +3,15 @@ import SwiftUI
 public struct SetupView: View {
     @AppStorage("server_url") private var serverUrl: String = ""
     @AppStorage("cache_limit_mb") private var cacheLimitMb: Int = 128
+    @AppStorage("allow_insecure_http") private var allowInsecureHttp: Bool = true
     @Binding var isPresented: Bool
 
     @State private var inputUrl: String = ""
     @State private var statusMessage: String = ""
     @State private var isTesting: Bool = false
     @State private var isSuccess: Bool = false
+
+    private let cacheLimitOptions = [64, 128, 256, 512, 1024]
 
     public init(isPresented: Binding<Bool>) {
         self._isPresented = isPresented
@@ -20,19 +23,31 @@ public struct SetupView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("StrmAction")
-                        .font(.system(size: 32, weight: .bold))
-                        .foregroundColor(Color(hex: "#E8B06A"))
-
-                    Text("连接到媒体库服务器")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(.white)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("StrmAction")
+                                .font(.system(size: 32, weight: .bold))
+                                .foregroundColor(Color(hex: "#E8B06A"))
+                            Text("连接到媒体库服务器")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(.white)
+                        }
+                        Spacer()
+                        if !serverUrl.isEmpty {
+                            Button(action: { isPresented = false }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(Color(hex: "#8A93A5"))
+                            }
+                        }
+                    }
 
                     Text("输入你的 StrmAction 服务端地址（如 http://192.168.1.10:8080 或 https://media.yourdomain.com）。")
                         .font(.system(size: 14))
                         .foregroundColor(Color(hex: "#8A93A5"))
                         .lineSpacing(4)
 
+                    // 服务器地址输入
                     VStack(alignment: .leading, spacing: 8) {
                         Text("服务器地址")
                             .font(.system(size: 13, weight: .medium))
@@ -46,8 +61,51 @@ public struct SetupView: View {
                             .background(Color(hex: "#14161C"))
                             .cornerRadius(8)
                             .foregroundColor(.white)
+                            .onChange(of: inputUrl) { _ in
+                                isSuccess = false
+                                statusMessage = ""
+                            }
                     }
                     .padding(.top, 10)
+
+                    // 缓存与网络高级设置
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("高级设置")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color(hex: "#8A93A5"))
+
+                        HStack {
+                            Text("预读缓存限制")
+                                .font(.system(size: 14))
+                                .foregroundColor(.white)
+                            Spacer()
+                            Picker("缓存限制", selection: $cacheLimitMb) {
+                                ForEach(cacheLimitOptions, id: \.self) { mb in
+                                    Text("\(mb) MB").tag(mb)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .tint(Color(hex: "#E8B06A"))
+                        }
+                        .padding()
+                        .background(Color(hex: "#14161C"))
+                        .cornerRadius(8)
+
+                        Toggle(isOn: $allowInsecureHttp) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("允许局域网 HTTP / 自签名证书")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.white)
+                                Text("支持内网未配置 HTTPS 的家庭服务器直连")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Color(hex: "#8A93A5"))
+                            }
+                        }
+                        .toggleStyle(SwitchToggleStyle(tint: Color(hex: "#E8B06A")))
+                        .padding()
+                        .background(Color(hex: "#14161C"))
+                        .cornerRadius(8)
+                    }
 
                     if !statusMessage.isEmpty {
                         Text(statusMessage)
@@ -76,8 +134,8 @@ public struct SetupView: View {
                             Text("保存并进入")
                                 .frame(maxWidth: .infinity)
                                 .padding()
-                                .background(Color(hex: "#E8B06A"))
-                                .foregroundColor(Color(hex: "#07080A"))
+                                .background(isSuccess ? Color(hex: "#E8B06A") : Color(hex: "#374151"))
+                                .foregroundColor(isSuccess ? Color(hex: "#07080A") : Color(hex: "#9CA3AF"))
                                 .fontWeight(.semibold)
                                 .cornerRadius(8)
                         }
@@ -92,6 +150,9 @@ public struct SetupView: View {
         }
         .onAppear {
             inputUrl = serverUrl
+            if !serverUrl.isEmpty {
+                isSuccess = true
+            }
         }
     }
 
