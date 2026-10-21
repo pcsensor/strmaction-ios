@@ -628,7 +628,8 @@ public struct PlayerView: View {
             url: url,
             headers: playInfo.safeHeaders,
             resumeMs: playerController.currentPositionMs,
-            bufferLimitMb: playerController.bufferLimitMb
+            bufferLimitMb: playerController.bufferLimitMb,
+            diskCacheLimitMb: playerController.diskCacheLimitMb
         )
         loadTask?.cancel()
         loadTask = Task { @MainActor in

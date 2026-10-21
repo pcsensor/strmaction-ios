@@ -51,12 +51,21 @@ public struct PlaybackRequest: Equatable {
     /// `options.maxBufferDuration` 比较来决定暂停/恢复读取。
     /// 两者之间靠码率折算，见 `PlaybackBufferPreference.seconds(limitMb:bitRate:)`。
     public let bufferLimitMb: Int
+    /// 磁盘缓存上限（MB）。一次播放会话用多少磁盘存已拉取的数据。
+    public let diskCacheLimitMb: Int
 
-    public init(url: URL, headers: [String: String], resumeMs: Int64, bufferLimitMb: Int) {
+    public init(
+        url: URL,
+        headers: [String: String],
+        resumeMs: Int64,
+        bufferLimitMb: Int,
+        diskCacheLimitMb: Int
+    ) {
         self.url = url
         self.headers = headers
         self.resumeMs = resumeMs
         self.bufferLimitMb = bufferLimitMb
+        self.diskCacheLimitMb = diskCacheLimitMb
     }
 
     /// 从服务端响应构造。URL 非法时返回 nil。
@@ -66,6 +75,30 @@ public struct PlaybackRequest: Equatable {
         self.headers = playInfo.safeHeaders
         self.resumeMs = max(0, playInfo.resumeMs)
         self.bufferLimitMb = PlaybackBufferPreference.limitMb
+        self.diskCacheLimitMb = DiskCachePreference.limitMb
+    }
+}
+
+// MARK: - 磁盘缓存偏好
+
+/// 一次播放会话可用的磁盘缓存上限。
+///
+/// 会话结束时整目录删除，所以这个值只需要装得下「当前这一部片子已经看过的部分」。
+enum DiskCachePreference {
+    static let defaultsKey = "disk_cache_limit_mb"
+    static let presets: [Int] = [512, 1024, 2048, 4096, 8192]
+    static let defaultLimitMb = 2048
+    static let minLimitMb = 128
+    static let maxLimitMb = 32768
+
+    static var limitMb: Int {
+        let value = UserDefaults.standard.integer(forKey: defaultsKey)
+        guard value > 0 else { return defaultLimitMb }
+        return clamp(value)
+    }
+
+    static func clamp(_ value: Int) -> Int {
+        min(maxLimitMb, max(minLimitMb, value))
     }
 }
 

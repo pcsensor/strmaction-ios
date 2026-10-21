@@ -5,6 +5,9 @@ public struct SetupView: View {
     @AppStorage("buffer_limit_mb") private var bufferLimitMb: Int = PlaybackBufferPreference.defaultLimitMb
     @State private var isCustomBuffer = false
     @State private var customBufferText = ""
+    @AppStorage("disk_cache_limit_mb") private var diskCacheLimitMb: Int = DiskCachePreference.defaultLimitMb
+    @State private var isCustomDisk = false
+    @State private var customDiskText = ""
     @State private var showTrust = false
     @ObservedObject var trustStore = TLSTrustStore.shared
     @Binding var isPresented: Bool
@@ -130,6 +133,58 @@ public struct SetupView: View {
                         .background(Color(hex: "#14161C"))
                         .cornerRadius(8)
 
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("磁盘缓存上限")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.white)
+                                    Text("存已拉取的片段，退出播放即清空")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color(hex: "#8A93A5"))
+                                }
+                                Spacer()
+                                Picker("磁盘缓存上限", selection: diskCacheSelection) {
+                                    ForEach(DiskCachePreference.presets, id: \.self) { mb in
+                                        Text(Self.diskCacheLabel(mb)).tag(mb)
+                                    }
+                                    Text("自定义…").tag(-1)
+                                }
+                                .pickerStyle(.menu)
+                                .tint(Color(hex: "#E8B06A"))
+                            }
+
+                            if isCustomDisk {
+                                HStack(spacing: 8) {
+                                    TextField("MB", text: $customDiskText)
+                                        .keyboardType(.numberPad)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 88)
+                                    Text("MB（\(DiskCachePreference.minLimitMb)–\(DiskCachePreference.maxLimitMb)）")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(Color(hex: "#8A93A5"))
+                                    Spacer()
+                                    Button("应用") {
+                                        if let value = Int(customDiskText) {
+                                            diskCacheLimitMb = DiskCachePreference.clamp(value)
+                                            customDiskText = "\(diskCacheLimitMb)"
+                                            isCustomDisk = false
+                                        }
+                                    }
+                                    .font(.system(size: 13, weight: .medium))
+                                    .tint(Color(hex: "#E8B06A"))
+                                    .disabled(Int(customDiskText) == nil)
+                                }
+                            }
+
+                            Text("当前 \(Self.diskCacheLabel(diskCacheLimitMb))，超出后停止落盘但继续播放")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#8A93A5"))
+                        }
+                        .padding()
+                        .background(Color(hex: "#14161C"))
+                        .cornerRadius(8)
+
                         Button {
                             showTrust = true
                         } label: {
@@ -204,6 +259,8 @@ public struct SetupView: View {
             // 上次存的是自定义值时，直接把输入框展开
             isCustomBuffer = !PlaybackBufferPreference.presets.contains(bufferLimitMb)
             customBufferText = "\(bufferLimitMb)"
+            isCustomDisk = !DiskCachePreference.presets.contains(diskCacheLimitMb)
+            customDiskText = "\(diskCacheLimitMb)"
         }
         .sheet(isPresented: $showTrust) {
             TrustManagementView()
@@ -224,6 +281,26 @@ public struct SetupView: View {
                 }
             }
         )
+    }
+
+    /// 磁盘缓存上限：固定档位 + 自定义。
+    private var diskCacheSelection: Binding<Int> {
+        Binding(
+            get: { DiskCachePreference.presets.contains(diskCacheLimitMb) ? diskCacheLimitMb : -1 },
+            set: { newValue in
+                if newValue == -1 {
+                    customDiskText = "\(diskCacheLimitMb)"
+                    isCustomDisk = true
+                } else {
+                    isCustomDisk = false
+                    diskCacheLimitMb = newValue
+                }
+            }
+        )
+    }
+
+    private static func diskCacheLabel(_ mb: Int) -> String {
+        mb >= 1024 ? "\(mb / 1024) GB" : "\(mb) MB"
     }
 
     /// 证书信任摘要，展示当前已导入的根证书数量。

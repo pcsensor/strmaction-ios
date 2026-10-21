@@ -23,6 +23,8 @@ public final class VideoPlayerController: ObservableObject {
     @Published public private(set) var bufferLimitMb: Int = PlaybackBufferPreference.defaultLimitMb
     /// 按码率折算出的实际目标时长（秒）。面板里的读数用它。
     @Published public private(set) var bufferTargetSeconds: Double = PlaybackBufferPreference.secondsForCurrentLimit()
+    /// 本次会话的磁盘缓存上限（MB）。
+    @Published public private(set) var diskCacheLimitMb: Int = DiskCachePreference.defaultLimitMb
     @Published public var playbackSpeed: Double = 1.0
     @Published public var isAspectFill: Bool = false
     @Published public private(set) var errorMessage: String?
@@ -50,6 +52,8 @@ public final class VideoPlayerController: ObservableObject {
     /// 当前会话的选项实例。`KSOptions` 是引用类型，
     /// ready 之后改 `maxBufferDuration` 会立刻被 `codecDidChangeCapacity` 读到。
     private var activeOptions: KSOptions?
+    /// 当前会话的磁盘缓存；`destroy()` 时停止服务并删除目录。
+    private var cacheSession: MediaCacheSession?
     /// 诊断节流：上次记录过的播放秒数。
     private var lastDiagnosticSecond: Int64 = -1
 
@@ -90,18 +94,34 @@ public final class VideoPlayerController: ObservableObject {
             }
         }
 
-        // 2. 选项
-        let options: KSOptions
+        // 2. 磁盘缓存层
+        //
+        //    播放地址会被换成本地 127.0.0.1：字节从这里进出，读过的位置落盘，
+        //    之后 seek 回同一位置直接命中磁盘，不再回源。
+        //    会话结束（destroy）整目录删除。
+        let session: MediaCacheSession
         do {
-            options = try MediaTransport.makeOptions(for: request)
+            session = try await MediaCacheSession.start(
+                sourceURL: request.url,
+                headers: request.headers,
+                limitMb: request.diskCacheLimitMb
+            )
         } catch {
-            fail(error.localizedDescription)
+            fail("磁盘缓存层启动失败：\(error.localizedDescription)")
+            return
+        }
+        cacheSession?.stop()
+        cacheSession = session
+
+        // 3. 选项
+        let options = MediaTransport.makeOptions(for: request)
+
+        guard !Task.isCancelled else {
+            session.stop()
             return
         }
 
-        guard !Task.isCancelled else { return }
-
-        // 3. 重建图层
+        // 4. 重建图层
         if let oldLayer = ksCoordinator.playerLayer, oldLayer.isPipActive {
             oldLayer.isPipActive = false
         }
@@ -113,11 +133,13 @@ public final class VideoPlayerController: ObservableObject {
 
         setupResumeMs = request.resumeMs
         bufferLimitMb = request.bufferLimitMb
+        diskCacheLimitMb = request.diskCacheLimitMb
         bufferTargetSeconds = PlaybackBufferPreference.seconds(
             limitMb: request.bufferLimitMb,
             bitRate: PlaybackBufferPreference.observedBitRate
         )
-        playbackURL = request.url
+        // 交给播放器的是本地缓存地址，不是源站地址。
+        playbackURL = session.localURL
         installKSPlayerCallbacks()
         ksOptions = options
         activeOptions = options
@@ -424,6 +446,10 @@ public final class VideoPlayerController: ObservableObject {
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
         resetState()
+
+        // 退出播放即清空本次会话的磁盘缓存。
+        cacheSession?.stop()
+        cacheSession = nil
 
         if let layer = ksCoordinator.playerLayer, layer.isPipActive {
             layer.isPipActive = false
