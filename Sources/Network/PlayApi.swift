@@ -95,7 +95,7 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
 
         do {
-            let (data, response) = try await session.data(for: request, delegate: self)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
             }
@@ -141,7 +141,7 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
-            let (data, response) = try await session.data(for: request, delegate: self)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
             }
@@ -187,7 +187,7 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
         request.httpMethod = "GET"
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
 
-        let (data, response) = try await session.data(for: request, delegate: self)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw PlayApiError.badResponse(statusCode: 0, message: "字幕下载失败")
         }
