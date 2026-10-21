@@ -126,9 +126,12 @@ final class PlayerUIController: ObservableObject {
 
     init() {
         // 用当前系统亮度作为起点，用户一上手就知道「原来是多少」。
+        // 注意：这里必须用局部变量，不能读 brightness —— 在全部存储属性初始化完成前
+        // 访问 self 属于非法访问，Swift 会直接编译报错。
         let systemBrightness = Double(UIScreen.main.brightness)
-        brightness = max(0.02, min(1.0, systemBrightness.isFinite ? systemBrightness : 0.6))
-        dimAmount = (1 - brightness) * PlayerTheme.maxDimAmount
+        let initialBrightness = max(0.02, min(1.0, systemBrightness.isFinite ? systemBrightness : 0.6))
+        brightness = initialBrightness
+        dimAmount = (1 - initialBrightness) * PlayerTheme.maxDimAmount
         volume = 1.0
     }
 
