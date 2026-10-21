@@ -26,9 +26,15 @@ enum MediaTransport {
         //    公共根证书与已固定的自签名证书，覆盖「源站 → 302 → CDN」两跳。
         options.formatContextOptions["ca_file"] = caBundlePath
         options.formatContextOptions["tls_verify"] = "1"
-        // 源站多为纯 IP 的自签名证书，通常不含匹配的 SAN；
-        // 由于已按指纹固定，主机名校验不再提供额外安全性，故关闭。
-        options.formatContextOptions["verifyhost"] = "0"
+
+        // 刻意**不设置** verifyhost。
+        // 它在 FFmpeg 里是 AV_OPT_TYPE_STRING（要校验的期望主机名），不是布尔开关；
+        // 一旦赋值就会覆盖 URL 里解析出的主机名。留空时 tls.c 会用 URI 的主机名，
+        // 这正是我们想要的：证书必须对该地址有效。
+        //
+        // 另外 ca_file 由 tls_securetransport 的 import_pem 通过 ffio_open_whitelist 读取，
+        // 因此协议白名单必须包含 file，否则读不到证书文件，握手直接失败。
+        options.formatContextOptions["protocol_whitelist"] = "file,http,https,tls,tcp,crypto"
 
         // 3. 网络健壮性（不是回退）：断流重连与读写超时。
         options.formatContextOptions["reconnect"] = "1"
@@ -63,7 +69,10 @@ enum MediaTransport {
         KSOptions.secondPlayerType = KSMEPlayer.self
         KSOptions.useSystemHTTPProxy = false
 
+        let bundleAttrs = try? FileManager.default.attributesOfItem(atPath: caBundlePath)
+        let bundleSize = (bundleAttrs?[.size] as? NSNumber)?.intValue ?? 0
         D.log("transport", "options ca_file=\(caBundlePath.split(separator: "/").last ?? "-") "
+            + "存在=\(FileManager.default.fileExists(atPath: caBundlePath)) 大小=\(bundleSize) "
             + "cache=\(options.cache) maxBuffer=\(options.maxBufferDuration)s "
             + "probesize=1MB 请求头=\(request.headers.keys.sorted().joined(separator: ","))")
 

@@ -291,4 +291,23 @@ enum CertificateTools {
         var error: CFError?
         return SecTrustEvaluateWithError(trust, &error)
     }
+
+    /// 以链上的叶子证书为唯一锚点，按 SSL 策略（含主机名）重新评估一次。
+    ///
+    /// 这正好模拟 FFmpeg 侧 `tls_verify=1` + `ca_file=<该证书>` 时的判定：
+    /// 返回 false 说明即使证书文件正确，FFmpeg 仍会因主机名不匹配而握手失败。
+    static func validatesAsAnchor(chain: [SecCertificate], host: String) -> Bool {
+        guard let leaf = chain.first else { return false }
+        var trust: SecTrust?
+        let status = SecTrustCreateWithCertificates(
+            chain as CFArray,
+            SecPolicyCreateSSL(true, host as CFString),
+            &trust
+        )
+        guard status == errSecSuccess, let trust else { return false }
+        SecTrustSetAnchorCertificates(trust, [leaf] as CFArray)
+        SecTrustSetAnchorCertificatesOnly(trust, true)
+        var error: CFError?
+        return SecTrustEvaluateWithError(trust, &error)
+    }
 }

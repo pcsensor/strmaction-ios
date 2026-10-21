@@ -133,7 +133,15 @@ enum TLSProbe {
                 notAfter: CertificateTools.notAfter(of: leaf),
                 isPubliclyTrusted: CertificateTools.isPubliclyTrusted(trust)
             )
-            D.log("probe", "探测成功 \(hostKey) 公共CA=\(capture.isPubliclyTrusted) 主体=\(capture.subject)")
+
+            // 预判 FFmpeg 侧 ca_file + tls_verify=1 是否能够通过：
+            // 以叶子证书为锚点、按 SSL 策略（含主机名）评估一次。
+            let chainUsable = CertificateTools.validatesAsAnchor(chain: chain, host: host)
+            D.log("probe", "探测成功 \(hostKey) 公共CA=\(capture.isPubliclyTrusted) 可链校验=\(chainUsable) 主体=\(capture.subject)")
+            if !capture.isPubliclyTrusted && !chainUsable {
+                D.log("probe", "警告：证书无法作为锚点通过主机名校验，FFmpeg 会拒绝连接。"
+                    + "通常是证书缺少 SAN（应包含 IP:\(host) 或对应域名）。")
+            }
             return capture
         }
     }
