@@ -22,8 +22,8 @@ enum PlayerTheme {
     static let panelRaised = Color(hex: "#1B1F2B")
     static let hairline = Color.white.opacity(0.10)
 
-    static let trackUnplayed = Color.white.opacity(0.26)
-    static let trackBuffered = Color.white.opacity(0.62)
+    static let trackUnplayed = Color.white.opacity(0.24)
+    static let trackBuffered = Color.white.opacity(0.72)
 
     static let pillBackground = Color.white.opacity(0.16)
     static let itemBackground = Color.white.opacity(0.07)
@@ -47,7 +47,7 @@ enum PlayerTheme {
     static let centerButtonSize: CGFloat = 56
     static let lockButtonSize: CGFloat = 44
     static let seekBarHeight: CGFloat = 28
-    static let seekTrackHeight: CGFloat = 4
+    static let seekTrackHeight: CGFloat = 5
     static let topBarPadding = EdgeInsets(top: 10, leading: 12, bottom: 8, trailing: 12)
     static let bottomBarPadding = EdgeInsets(top: 6, leading: 14, bottom: 12, trailing: 14)
     static let topBarGradientHeight: CGFloat = 96

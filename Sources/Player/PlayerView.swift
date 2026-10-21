@@ -283,15 +283,30 @@ public struct PlayerView: View {
                 .contentShape(Rectangle())
                 .gesture(tapGesture(size: size))
                 .highPriorityGesture(dragGesture(size: size))
-                .onLongPressGesture(
-                    minimumDuration: 0.35,
-                    maximumDistance: PlayerTheme.dragSlop,
-                    perform: { ui.setLongPressSpeed(true) },
-                    onPressingChanged: { pressing in
-                        if !pressing { ui.setLongPressSpeed(false) }
-                    }
-                )
+                .gesture(longPressSpeedGesture)
         }
+    }
+
+    /// 长按画面临时加速。
+    ///
+    /// 不用 `onLongPressGesture(perform:onPressingChanged:)`：perform 触发后手势即进入
+    /// ended 状态，抬手时 `onPressingChanged(false)` 不再可靠回调，
+    /// 结果松手停在倍速，要再按一次才恢复。
+    ///
+    /// `LongPressGesture.sequenced(before: DragGesture(minimumDistance: 0))` 的
+    /// `onEnded` 在抬手时必定触发，可以确定地退出倍速；`onChanged` 在长按判定成功
+    /// 的那一刻进入 `.second(true, _)`，正好作为进入点。
+    private var longPressSpeedGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.35, maximumDistance: PlayerTheme.dragSlop)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                if case .second(true, _) = value {
+                    ui.setLongPressSpeed(true)
+                }
+            }
+            .onEnded { _ in
+                ui.setLongPressSpeed(false)
+            }
     }
 
     /// 单击切控件、双击分区快进快退。用 ExclusiveGesture 保证双击优先，
@@ -614,7 +629,7 @@ public struct PlayerView: View {
             url: url,
             headers: playInfo.safeHeaders,
             resumeMs: playerController.currentPositionMs,
-            cacheLimitMb: playInfo.safeCacheLimitMb
+            bufferTargetSeconds: playerController.bufferTargetSeconds
         )
         loadTask?.cancel()
         loadTask = Task { @MainActor in
@@ -655,6 +670,8 @@ public struct PlayerView: View {
 
     private func cleanup() {
         D.log("view", "cleanup → 销毁播放会话")
+        // 页面消失时如果还停在长按倍速，下一集进来会莫名其妙一直是 2x。
+        ui.endLongPressSpeed()
         loadTask?.cancel()
         loadTask = nil
         heartbeatTimer?.invalidate()

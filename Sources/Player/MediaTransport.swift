@@ -71,14 +71,19 @@ enum MediaTransport {
         options.registerRemoteControll = false
         options.canStartPictureInPictureAutomaticallyFromInline = true
 
-        // 6. 缓存
-        let cacheMb = max(0, request.cacheLimitMb)
-        options.cache = cacheMb > 0
-        if cacheMb > 0 {
-            let seconds = min(300.0, max(15.0, Double(cacheMb)))
-            options.maxBufferDuration = seconds
-            options.preferredForwardBufferDuration = min(seconds, max(3.0, seconds / 4))
-        }
+        // 6. 缓冲
+        //
+        //    只有 maxBufferDuration 对 MEPlayer 真实生效：
+        //    MEPlayerItem 在 loadedTime > maxBufferDuration 时暂停读取，
+        //    降到一半以下再恢复——这是全链路唯一的缓冲控制点。
+        //
+        //    刻意不再设置的两项：
+        //    - options.cache：它只决定 URL 要不要加 "async:cache:" 前缀，
+        //      而 https URL 在 MEPlayerItem 里直接跳过该前缀，设了也没用；
+        //    - preferredForwardBufferDuration：只被 KSAVPlayer 读取，
+        //      单一内核是 KSMEPlayer，它永远读不到这里。
+        let bufferSeconds = max(5, min(600, request.bufferTargetSeconds))
+        options.maxBufferDuration = bufferSeconds
 
         // 7. 单一内核。
         //    刻意把 secondPlayerType 也设为 KSMEPlayer：KSPlayer 的类型列表若为空，
@@ -100,7 +105,7 @@ enum MediaTransport {
         D.log("transport", "options ca_file=\(caBundlePath.split(separator: "/").last ?? "-") "
             + "存在=\(FileManager.default.fileExists(atPath: caBundlePath)) 大小=\(bundleSize) "
             + "受信任根=\(TLSTrustStore.shared.snapshot().count) "
-            + "cache=\(options.cache) maxBuffer=\(options.maxBufferDuration)s "
+            + "缓冲目标=\(Int(bufferSeconds))s "
             + "UA=\(injectedUA) 额外头=\(extraHeaders.isEmpty ? "无" : extraHeaders)")
 
         return options

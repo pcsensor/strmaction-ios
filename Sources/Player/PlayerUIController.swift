@@ -299,6 +299,8 @@ final class PlayerUIController: ObservableObject {
 
     func openDrawer(_ drawer: PlayerDrawer) {
         cancelAutoHide()
+        // 打开面板时不允许残留长按倍速。
+        endLongPressSpeed()
         withAnimation(.spring(response: PlayerTheme.drawerOpenDuration, dampingFraction: 0.9)) {
             activeDrawer = drawer
             isControlsVisible = false
@@ -374,6 +376,9 @@ final class PlayerUIController: ObservableObject {
     func setLongPressSpeed(_ enabled: Bool) {
         guard let player else { return }
         if enabled {
+            // 幂等：手势的 onChanged 会连续回调，若每次都覆盖 speedBeforeLongPress，
+            // 松手就会「恢复」到倍速本身，等于永远退不出去。
+            guard speedBeforeLongPress == nil else { return }
             guard player.isPlaying, gestureMode == .none else { return }
             speedBeforeLongPress = player.playbackSpeed
             player.setSpeed(UserDefaults.standard.double(forKey: "long_press_speed").nonZeroOrDefault(2.0))
@@ -389,6 +394,11 @@ final class PlayerUIController: ObservableObject {
                 speedBadge = nil
             }
         }
+    }
+
+    /// 无条件退出长按倍速。打开面板、页面消失、锁屏等路径都调它兜底。
+    func endLongPressSpeed() {
+        setLongPressSpeed(false)
     }
 
     func commitLongPressSpeed(_ value: Double) {

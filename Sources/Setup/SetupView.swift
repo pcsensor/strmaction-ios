@@ -2,7 +2,7 @@ import SwiftUI
 
 public struct SetupView: View {
     @AppStorage("server_url") private var serverUrl: String = ""
-    @AppStorage("cache_limit_mb") private var cacheLimitMb: Int = 128
+    @AppStorage("buffer_target_seconds") private var bufferTargetSeconds: Double = PlaybackBufferPreference.defaultSeconds
     @State private var showTrust = false
     @ObservedObject var trustStore = TLSTrustStore.shared
     @Binding var isPresented: Bool
@@ -12,7 +12,7 @@ public struct SetupView: View {
     @State private var isTesting: Bool = false
     @State private var isSuccess: Bool = false
 
-    private let cacheLimitOptions = [64, 128, 256, 512, 1024]
+    private let bufferTargetOptions = PlaybackBufferPreference.options
 
     public init(isPresented: Binding<Bool>) {
         self._isPresented = isPresented
@@ -76,13 +76,18 @@ public struct SetupView: View {
                             .foregroundColor(Color(hex: "#8A93A5"))
 
                         HStack {
-                            Text("预读缓存限制")
-                                .font(.system(size: 14))
-                                .foregroundColor(.white)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("缓冲目标")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.white)
+                                Text("提前读取多少秒的媒体数据")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Color(hex: "#8A93A5"))
+                            }
                             Spacer()
-                            Picker("缓存限制", selection: $cacheLimitMb) {
-                                ForEach(cacheLimitOptions, id: \.self) { mb in
-                                    Text("\(mb) MB").tag(mb)
+                            Picker("缓冲目标", selection: $bufferTargetSeconds) {
+                                ForEach(bufferTargetOptions, id: \.self) { seconds in
+                                    Text("\(Int(seconds)) 秒").tag(seconds)
                                 }
                             }
                             .pickerStyle(.menu)

@@ -294,6 +294,14 @@ struct PlayerDrawerContent: View {
         return "已信任 \(trustStore.anchors.count) 个根证书"
     }
 
+    /// 播放点前方已经缓存了多少秒，以及当前的目标时长。
+    /// 用「前方剩余」而不是「已缓冲到的时间点」，因为前者才直接回答「拖过去会不会卡」。
+    private var bufferSubtitle: String {
+        let aheadMs = max(0, player.bufferedPositionMs - player.currentPositionMs)
+        let ahead = Int(aheadMs / 1000)
+        return "前方已缓存 \(ahead) 秒 · 目标 \(Int(player.bufferTargetSeconds)) 秒"
+    }
+
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 8) {
@@ -345,8 +353,8 @@ struct PlayerDrawerContent: View {
 
         PlayerDrawerActionRow(
             icon: "internaldrive",
-            title: "播放缓存",
-            subtitle: "\(playInfo.safeCacheLimitMb) MB · 已缓冲 \(PlayerTimeFormat.string(ms: player.bufferedPositionMs))"
+            title: "播放缓冲",
+            subtitle: bufferSubtitle
         ) {}
 
         if playInfo.nextItemId != nil || playInfo.nextTitle != nil {

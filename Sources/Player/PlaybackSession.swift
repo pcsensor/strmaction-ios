@@ -40,18 +40,23 @@ public enum PlaybackPhase: Equatable {
 
 // MARK: - 播放请求
 
-/// 交给引擎的一次播放请求。证书固定关系在进入引擎前已经建立完毕。
+/// 交给引擎的一次播放请求。证书信任关系在进入引擎前已经建立完毕。
 public struct PlaybackRequest: Equatable {
     public let url: URL
     public let headers: [String: String]
     public let resumeMs: Int64
-    public let cacheLimitMb: Int
+    /// 缓冲目标时长（秒）。
+    ///
+    /// 用时间而不是 MB：KSPlayer 的缓冲控制本来就是时间维度——
+    /// `MEPlayerItem` 拿解码容量层的 `loadedTime` 与 `options.maxBufferDuration`
+    /// 比较来决定暂停/恢复读取。MB 只有在知道码率时才能折算成时间，绕一圈还会算错。
+    public let bufferTargetSeconds: Double
 
-    public init(url: URL, headers: [String: String], resumeMs: Int64, cacheLimitMb: Int) {
+    public init(url: URL, headers: [String: String], resumeMs: Int64, bufferTargetSeconds: Double) {
         self.url = url
         self.headers = headers
         self.resumeMs = resumeMs
-        self.cacheLimitMb = cacheLimitMb
+        self.bufferTargetSeconds = bufferTargetSeconds
     }
 
     /// 从服务端响应构造。URL 非法时返回 nil。
@@ -60,6 +65,26 @@ public struct PlaybackRequest: Equatable {
         self.url = url
         self.headers = playInfo.safeHeaders
         self.resumeMs = max(0, playInfo.resumeMs)
-        self.cacheLimitMb = playInfo.safeCacheLimitMb
+        self.bufferTargetSeconds = PlaybackBufferPreference.seconds
+    }
+}
+
+// MARK: - 缓冲偏好
+
+/// 缓冲目标时长的唯一来源。
+///
+/// 服务端下发的 `cache_limit_mb` 不再参与：那个值是 MB，而真正起作用的
+/// `maxBufferDuration` 是秒，中间缺一个码率，硬换算只会得到一个没有意义的数字。
+/// 想要磁盘级缓存得先让 KSPlayer 的 `async:cache:` 协议对 https 生效，那是另一件事。
+enum PlaybackBufferPreference {
+    static let defaultsKey = "buffer_target_seconds"
+    /// 设置页可选项（秒）。
+    static let options: [Double] = [15, 30, 60, 120]
+    static let defaultSeconds: Double = 60
+
+    static var seconds: Double {
+        let value = UserDefaults.standard.double(forKey: defaultsKey)
+        guard value > 0 else { return defaultSeconds }
+        return min(600, max(5, value))
     }
 }

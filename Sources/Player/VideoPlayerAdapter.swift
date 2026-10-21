@@ -19,6 +19,8 @@ public final class VideoPlayerController: ObservableObject {
     @Published public private(set) var currentPositionMs: Int64 = 0
     @Published public private(set) var durationMs: Int64 = 0
     @Published public private(set) var bufferedPositionMs: Int64 = 0
+    /// 缓冲目标时长（秒）。面板里的实时读数与设置项都读它。
+    @Published public private(set) var bufferTargetSeconds: Double = PlaybackBufferPreference.defaultSeconds
     @Published public var playbackSpeed: Double = 1.0
     @Published public var isAspectFill: Bool = false
     @Published public private(set) var errorMessage: String?
@@ -62,7 +64,7 @@ public final class VideoPlayerController: ObservableObject {
 
     /// 建立证书固定关系、组装选项、创建图层。整个过程是确定的单行道。
     public func load(_ request: PlaybackRequest) async {
-        D.log("engine", "load \(request.url.absoluteString.prefix(110)) resumeMs=\(request.resumeMs) cacheMb=\(request.cacheLimitMb)")
+        D.log("engine", "load \(request.url.absoluteString.prefix(110)) resumeMs=\(request.resumeMs) buffer=\(Int(request.bufferTargetSeconds))s")
 
         resetState()
         phase = .resolving
@@ -106,6 +108,7 @@ public final class VideoPlayerController: ObservableObject {
         ksCoordinator.resetPlayer()
 
         setupResumeMs = request.resumeMs
+        bufferTargetSeconds = request.bufferTargetSeconds
         playbackURL = request.url
         installKSPlayerCallbacks()
         ksOptions = options
@@ -254,6 +257,19 @@ public final class VideoPlayerController: ObservableObject {
                 }
                 self.isPlaying = self.ksCoordinator.state.isPlaying
 
+                // 缓冲进度只认 playableTime。
+                //
+                // KSMEPlayer 里 playableTime = currentPlaybackTime + loadedTime，
+                // 也就是「已经能播到哪个时间点」。不要用 onBufferChanged：
+                // 它的两个参数是 (bufferedCount, consumeTime)，后者是「这一次缓冲花了多久」，
+                // 当成已缓冲秒数用会得到一个几百毫秒的数字，进度条永远画不出来。
+                if let layer = self.ksCoordinator.playerLayer {
+                    let playable = max(current, layer.player.playableTime)
+                    if playable > 0 {
+                        self.bufferedPositionMs = Int64(playable * 1000)
+                    }
+                }
+
                 // 有数据在动即脱离「连接中」。不在这里直接判 ready，
                 // 以免把「刚拿到首包」误当成「已经可播」。
                 if self.phase == .connecting || self.phase == .buffering {
@@ -265,13 +281,6 @@ public final class VideoPlayerController: ObservableObject {
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n")
                 self.subtitleText = subtitle.isEmpty ? nil : subtitle
-            }
-        }
-
-        ksCoordinator.onBufferChanged = { [weak self] _, buffered in
-            DispatchQueue.main.async {
-                guard let self, self.ksCoordinator.playerLayer != nil else { return }
-                self.bufferedPositionMs = Int64(buffered * 1000)
             }
         }
 
