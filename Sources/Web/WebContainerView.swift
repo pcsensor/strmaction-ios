@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import Security
 
 public struct WebContainerView: UIViewRepresentable {
     public let serverUrl: String
@@ -87,19 +88,34 @@ public struct WebContainerView: UIViewRepresentable {
             print("[WebContainer] 初始导航失败: \(error.localizedDescription)")
         }
 
-        // 处理 HTTPS 自签名证书放行
+        // 处理 HTTPS 自签名证书放行（支持纯 IP 直连）
         public func webView(
             _ webView: WKWebView,
             didReceive challenge: URLAuthenticationChallenge,
             completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
         ) {
             let allowInsecure = UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true
-            if allowInsecure && challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-               let serverTrust = challenge.protectionSpace.serverTrust {
-                completionHandler(.useCredential, URLCredential(trust: serverTrust))
-            } else {
+            guard allowInsecure,
+                  challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+                  let serverTrust = challenge.protectionSpace.serverTrust else {
                 completionHandler(.performDefaultHandling, nil)
+                return
             }
+
+            // 1. 设置允许基本 X.509 策略，支持纯 IP
+            let basicPolicy = SecPolicyCreateBasicX509()
+            SecTrustSetPolicies(serverTrust, basicPolicy)
+
+            // 2. 将服务端证书置入锚点
+            if let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate], !certChain.isEmpty {
+                SecTrustSetAnchorCertificates(serverTrust, certChain as CFArray)
+                SecTrustSetAnchorCertificatesOnly(serverTrust, false)
+            }
+
+            var error: CFError?
+            _ = SecTrustEvaluateWithError(serverTrust, &error)
+
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
         }
 
         // 处理网页 JavaScript alert

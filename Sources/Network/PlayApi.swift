@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 public enum PlayApiError: LocalizedError {
     case invalidServerUrl
@@ -20,11 +21,15 @@ public enum PlayApiError: LocalizedError {
     }
 }
 
-public final class PlayApi: NSObject, URLSessionDelegate {
+public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
     public static let shared = PlayApi()
 
     private lazy var insecureSession: URLSession = {
         let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10.0
+        config.timeoutIntervalForResource = 30.0
+        config.tlsMinimumSupportedProtocolVersion = .tlsProtocol12
+        config.tlsMaximumSupportedProtocolVersion = .tlsProtocol13
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
@@ -32,25 +37,59 @@ public final class PlayApi: NSObject, URLSessionDelegate {
         super.init()
     }
 
-    /// URLSessionDelegate: 放行自签名证书或 IP 访问直连
+    // Session 级别认证挑战拦截
     public func urlSession(
         _ session: URLSession,
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-           let serverTrust = challenge.protectionSpace.serverTrust {
-            completionHandler(.useCredential, URLCredential(trust: serverTrust))
-        } else {
+        handleServerTrustChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    // Task 级别认证挑战拦截（针对 Swift Concurrency data(for:delegate:)）
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleServerTrustChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    /// 核心自签名与 IP 证书放行处理
+    private func handleServerTrustChallenge(
+        _ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
             completionHandler(.performDefaultHandling, nil)
+            return
         }
+
+        // 1. 将策略重置为基础 X.509 结构策略，免去严格的标准 DNS 主机名匹配要求（支持纯 IP 直连）
+        let basicPolicy = SecPolicyCreateBasicX509()
+        SecTrustSetPolicies(serverTrust, basicPolicy)
+
+        // 2. 将服务端发来的证书链本身置入锚点信任列表中，支持 Caddy 等自签名 Authority
+        if let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate], !certChain.isEmpty {
+            SecTrustSetAnchorCertificates(serverTrust, certChain as CFArray)
+            SecTrustSetAnchorCertificatesOnly(serverTrust, false)
+        }
+
+        // 3. 评估信任结果
+        var error: CFError?
+        _ = SecTrustEvaluateWithError(serverTrust, &error)
+
+        // 4. 回传凭据完成 TLS 握手
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 
     private func getSession(allowInsecure: Bool) -> URLSession {
         return allowInsecure ? insecureSession : URLSession.shared
     }
 
-    /// 测试服务器连通性（支持自签名证书）
+    /// 测试服务器连通性（支持纯 IP 自签名证书）
     public func checkHealth(serverUrl: String, allowInsecure: Bool? = nil) async throws -> HealthResponse {
         guard let base = URL(string: serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
               let url = URL(string: "\(base.absoluteString)/api/health") else {
@@ -65,7 +104,7 @@ public final class PlayApi: NSObject, URLSessionDelegate {
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request, delegate: self)
             guard let http = response as? HTTPURLResponse else {
                 throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
             }
@@ -111,7 +150,7 @@ public final class PlayApi: NSObject, URLSessionDelegate {
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request, delegate: self)
             guard let http = response as? HTTPURLResponse else {
                 throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
             }
@@ -157,7 +196,7 @@ public final class PlayApi: NSObject, URLSessionDelegate {
         request.httpMethod = "GET"
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request, delegate: self)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw PlayApiError.badResponse(statusCode: 0, message: "字幕下载失败")
         }

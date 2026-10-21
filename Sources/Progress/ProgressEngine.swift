@@ -1,6 +1,7 @@
 import Foundation
+import Security
 
-public final class ProgressEngine: NSObject, URLSessionDelegate {
+public final class ProgressEngine: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
     public static let shared = ProgressEngine()
 
     private struct PendingReport {
@@ -19,6 +20,10 @@ public final class ProgressEngine: NSObject, URLSessionDelegate {
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 5.0
+        config.timeoutIntervalForResource = 15.0
+        config.tlsMinimumSupportedProtocolVersion = .tlsProtocol12
+        config.tlsMaximumSupportedProtocolVersion = .tlsProtocol13
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
@@ -31,13 +36,44 @@ public final class ProgressEngine: NSObject, URLSessionDelegate {
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        handleServerTrustChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleServerTrustChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    private func handleServerTrustChallenge(
+        _ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
         let allowInsecure = UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true
-        if allowInsecure && challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-           let serverTrust = challenge.protectionSpace.serverTrust {
-            completionHandler(.useCredential, URLCredential(trust: serverTrust))
-        } else {
+        guard allowInsecure,
+              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
             completionHandler(.performDefaultHandling, nil)
+            return
         }
+
+        // 1. 设置允许基本 X.509 策略，支持纯 IP
+        let basicPolicy = SecPolicyCreateBasicX509()
+        SecTrustSetPolicies(serverTrust, basicPolicy)
+
+        // 2. 将服务端证书置入锚点
+        if let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate], !certChain.isEmpty {
+            SecTrustSetAnchorCertificates(serverTrust, certChain as CFArray)
+            SecTrustSetAnchorCertificatesOnly(serverTrust, false)
+        }
+
+        var error: CFError?
+        _ = SecTrustEvaluateWithError(serverTrust, &error)
+
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 
     /// 入队并触发异步上报
@@ -123,7 +159,7 @@ public final class ProgressEngine: NSObject, URLSessionDelegate {
         request.httpBody = try? JSONEncoder().encode(body)
 
         do {
-            let (_, response) = try await session.data(for: request)
+            let (_, response) = try await session.data(for: request, delegate: self)
             guard let http = response as? HTTPURLResponse else { return false }
 
             if http.statusCode == 401 {
