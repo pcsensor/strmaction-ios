@@ -130,7 +130,8 @@ public struct PlayerView: View {
                 // 6. 锁定状态的解锁按钮（独立于控件层，始终压在亮度遮罩之上）
                 if ui.isLocked && ui.isLockButtonVisible {
                     PlayerLockButton(ui: ui)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .centerTrailing)
+                        // .trailing 即「水平靠右、垂直居中」；SwiftUI 没有 .centerTrailing。
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                         .padding(.trailing, 16)
                         .transition(.opacity)
                 }

@@ -61,9 +61,11 @@ struct PlayerDrawerView<Content: View>: View {
                 .fill(PlayerTheme.panel)
         }
         // 左侧投影 + 发丝描边，制造清晰的浮起层次（旧版完全没有，是边界不清的根因）。
+        // 注意：strokeBorder 只在 InsettableShape（RoundedRectangle / Capsule）上有，
+        // 自定义 Shape 只能用 stroke。
         .overlay {
             LeadingRoundedRectangle(radius: PlayerTheme.drawerCornerRadius, corners: .top)
-                .strokeBorder(PlayerTheme.hairline, lineWidth: 1)
+                .stroke(PlayerTheme.hairline, lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.55), radius: 26, x: -10, y: 0)
         .ignoresSafeArea(.container, edges: .bottom)
