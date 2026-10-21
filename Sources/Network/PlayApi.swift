@@ -37,8 +37,7 @@ public enum PlayApiError: LocalizedError {
                 let path = Self.codingPath(context.codingPath)
                 return "数据解析失败: 字段 \(path) 缺少值，期望 \(type)"
             case .dataCorrupted(let context):
-                let path = Self.codingPath(context.codingPath)
-                let suffix = path.isEmpty ? "" : "（字段 \(path)）"
+                let suffix = context.codingPath.isEmpty ? "" : "（字段 \(Self.codingPath(context.codingPath))）"
                 return "数据解析失败: \(context.debugDescription)\(suffix)"
             @unknown default:
                 return "数据解析失败: \(decodingError.localizedDescription)"

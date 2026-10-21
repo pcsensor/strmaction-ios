@@ -52,6 +52,9 @@ public final class VideoPlayerController: ObservableObject {
 
         #if canImport(KSPlayer)
         // 先移除旧图层并重建底层 player layer；仅修改 URL 不会让 KSPlayer 重建播放器。
+        if let oldLayer = ksCoordinator.playerLayer, oldLayer.isPipActive {
+            oldLayer.isPipActive = false
+        }
         pipStateCancellable?.cancel()
         pipStateCancellable = nil
         boundPiPLayer = nil
@@ -81,9 +84,10 @@ public final class VideoPlayerController: ObservableObject {
 
         KSOptions.firstPlayerType = KSMEPlayer.self
         KSOptions.secondPlayerType = KSAVPlayer.self
-        self.ksOptions = options
         self.setupResumeMs = max(0, resumeMs)
         installKSPlayerCallbacks()
+        // 最后再发布 options，确保 SwiftUI 创建图层时回调与续播位置都已就绪。
+        self.ksOptions = options
 
         // 重试/重新 setup 时恢复用户已选择的字幕。
         DispatchQueue.main.async { [weak self] in
@@ -392,6 +396,9 @@ public final class VideoPlayerController: ObservableObject {
         isPiPActive = false
         subtitleText = nil
         #if canImport(KSPlayer)
+        if let layer = ksCoordinator.playerLayer, layer.isPipActive {
+            layer.isPipActive = false
+        }
         ksOptions = nil
         setupResumeMs = 0
         pipStateCancellable?.cancel()

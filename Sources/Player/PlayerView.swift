@@ -301,11 +301,18 @@ public struct PlayerView: View {
                         handleDoubleTap(at: event.location, width: geometry.size.width)
                     }
             )
-            .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.4)
-                    .onEnded { _ in
-                        triggerLongPressSpeed(true)
+            .onLongPressGesture(
+                minimumDuration: 0.4,
+                maximumDistance: 50,
+                perform: {
+                    triggerLongPressSpeed(true)
+                },
+                onPressingChanged: { pressing in
+                    // LongPressGesture 本身没有“松手”回调，用 pressing 状态恢复原倍速。
+                    if !pressing && isFastForwarding {
+                        triggerLongPressSpeed(false)
                     }
+                }
             )
             .simultaneousGesture(
                 DragGesture()
@@ -370,8 +377,8 @@ public struct PlayerView: View {
         if abs(translation.width) > abs(translation.height) && abs(translation.width) > 20 {
             let scrubDeltaSeconds = Int64(translation.width / 5)
             playerController.skip(seconds: scrubDeltaSeconds)
-            scrubPreviewText = nil
         }
+        scrubPreviewText = nil
         panStartBrightness = nil
         panStartVolume = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -926,6 +933,8 @@ public struct PlayerView: View {
                 resumeMs: playInfo.resumeMs,
                 cacheLimitMb: playInfo.safeCacheLimitMb
             )
+        } else {
+            playerController.errorMessage = "无效的播放地址"
         }
 
         startHeartbeat()
@@ -1020,8 +1029,10 @@ public struct PlayerView: View {
     private func startLoadingTimeoutTimer() {
         loadingTimeoutTimer?.invalidate()
         loadingTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: false) { _ in
-            if !self.playerController.isReady && self.playerController.errorMessage == nil {
-                self.showTimeoutAlert = true
+            Task { @MainActor in
+                if !self.playerController.isReady && self.playerController.errorMessage == nil {
+                    self.showTimeoutAlert = true
+                }
             }
         }
     }
@@ -1101,6 +1112,8 @@ public struct PlayerView: View {
                 cacheLimitMb: playInfo.safeCacheLimitMb
             )
             startLoadingTimeoutTimer()
+        } else {
+            playerController.errorMessage = "无效的播放地址"
         }
     }
 
@@ -1176,11 +1189,14 @@ public struct PlayerView: View {
     }
 
     private func startHeartbeat() {
-        let interval = Double(playInfo.safeProgressIntervalMs) / 1000.0
+        heartbeatTimer?.invalidate()
+        let interval = max(1.0, Double(playInfo.safeProgressIntervalMs) / 1000.0)
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
-            if self.playerController.isPlaying {
-                self.sendProgress(finished: false)
-                self.setupNowPlayingInfo()
+            Task { @MainActor in
+                if self.playerController.isPlaying {
+                    self.sendProgress(finished: false)
+                    self.setupNowPlayingInfo()
+                }
             }
         }
     }
