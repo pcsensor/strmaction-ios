@@ -280,7 +280,9 @@ struct PlayerDrawerContent: View {
     /// 打开证书信任管理（查看 / 撤销已固定的服务器指纹）。
     let onShowTrust: () -> Void
 
-    @ObservedObject private var trustStore = TLSTrustStore.shared
+    // 注意：不能用 private，否则合成的成员构造器会变成 private，
+    // 导致跨文件的 PlayerDrawerContent(...) 调用无法访问。
+    @ObservedObject var trustStore = TLSTrustStore.shared
 
     private var speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
     private let longPressSpeeds: [Double] = [1.5, 2.0, 2.5, 3.0]

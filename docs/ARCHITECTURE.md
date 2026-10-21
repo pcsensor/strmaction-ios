@@ -86,8 +86,29 @@ StrmAction 是一个面向 `.strm` 媒体库的「刮削 + 展示 + 播放分发
 * 请求 `GET /api/health` 验证服务是否存活及版本号。
 * 保存以下配置至 `UserDefaults`：
   * `server_url`：服务器完整地址（标准化去除结尾 `/`）。
-  * `allow_insecure_http`：是否允许自签名证书或本地局域网 HTTP。
   * `cache_limit_mb`：本地播放缓存限制（默认 128MB）。
+  * `tls_pinned_certificates`：已固定的服务器证书指纹（由 `TLSTrustStore` 维护）。
+
+> 自签名不再有全局开关。信任以「每主机证书指纹固定」的方式表达，
+> 可在 SetupView 的「证书信任」入口查看与撤销。
+
+### 4.1.1 信任层（Trust）
+
+自签名 HTTPS 的处理集中在 `Sources/Trust/`，遵循**一种传输栈、一处信任策略**：
+
+| 模块 | 职责 |
+|---|---|
+| `TLSTrustStore` | 每主机 SHA-256 指纹固定、持久化；生成 FFmpeg 用的 CA bundle |
+| `TLSProbe` | `NWConnection` 完成一次 TLS 握手，捕获证书链（TOFU 数据来源） |
+| `SecurityPolicy` | 唯一信任判定，URLSession 委托与探针共用同一份数据 |
+
+判定顺序固定为三条：已有固定 → 只认该指纹；无固定但可由公共根验证 → 交给系统；
+无固定且不可公共验证 → 首次使用即固定（TOFU）。
+
+媒体字节**只走 FFmpeg 自己的 HTTP/TLS 栈**，不经过任何中间进程：
+`MediaTransport` 把原始 URL、服务端下发的请求头、以及
+`ca_file`（公共根 ＋ 固定证书）组装成 `KSOptions` 交给播放器。
+`URLSession` 仅用于 KB 级 API（play 接口、字幕、进度上报）。
 
 ### 4.2 MainWebViewController（网页容器）
 * 承载完整的 Web 端业务体验。

@@ -76,7 +76,7 @@ enum D {
 // MARK: - 日志查看面板
 
 struct PlayerDiagnosticsView: View {
-    @ObservedObject private var diagnostics = PlayerDiagnostics.shared
+    @ObservedObject var diagnostics = PlayerDiagnostics.shared
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
 

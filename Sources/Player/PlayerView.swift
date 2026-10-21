@@ -209,8 +209,8 @@ public struct PlayerView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             sendProgress(finished: false)
         }
-        .onReceive(playerController.$isReady.removeDuplicates()) { ready in
-            if ready {
+        .onReceive(playerController.$phase.removeDuplicates()) { phase in
+            if phase == .ready {
                 setupRemoteCommands()
             }
         }

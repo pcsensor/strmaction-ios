@@ -4,7 +4,7 @@ public struct SetupView: View {
     @AppStorage("server_url") private var serverUrl: String = ""
     @AppStorage("cache_limit_mb") private var cacheLimitMb: Int = 128
     @State private var showTrust = false
-    @ObservedObject private var trustStore = TLSTrustStore.shared
+    @ObservedObject var trustStore = TLSTrustStore.shared
     @Binding var isPresented: Bool
 
     @State private var inputUrl: String = ""

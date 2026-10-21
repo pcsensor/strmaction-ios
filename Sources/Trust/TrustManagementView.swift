@@ -5,9 +5,8 @@ import SwiftUI
 /// 展示当前已固定的服务器指纹，允许逐个撤销或全部清空。
 /// 撤销后下一次播放会重新走一次 TOFU 固定流程。
 struct TrustManagementView: View {
-    @ObservedObject private var store = TLSTrustStore.shared
+    @ObservedObject var store = TLSTrustStore.shared
     @Environment(\.dismiss) private var dismiss
-    @State private var pendingRemove: PinnedCertificate?
 
     var body: some View {
         NavigationView {

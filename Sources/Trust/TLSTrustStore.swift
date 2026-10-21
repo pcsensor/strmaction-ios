@@ -276,17 +276,13 @@ enum CertificateTools {
         (SecCertificateCopySubjectSummary(certificate) as String?) ?? "未知主体"
     }
 
+    /// 证书到期时间。
+    ///
+    /// iOS 没有公开 API 读取单张证书的有效期字段：
+    /// `SecCertificateCopyValues` 与 `kSecOIDX509V1ValidityNotAfter` 只在 macOS 提供。
+    /// 这里返回 nil，UI 会自动隐藏该项；指纹固定本身不依赖有效期。
     static func notAfter(of certificate: SecCertificate) -> Date? {
-        guard let values = SecCertificateCopyValues(
-            certificate,
-            [kSecOIDX509V1ValidityNotAfter] as CFArray,
-            nil
-        ) as? [String: Any],
-        let entry = values[kSecOIDX509V1ValidityNotAfter as String] as? [String: Any],
-        let raw = entry[kSecPropertyKeyValue as String] as? Double
-        else { return nil }
-        // 相对 2001-01-01 的秒数（CFAbsoluteTime）。
-        return Date(timeIntervalSinceReferenceDate: raw)
+        nil
     }
 
     /// 该链能否被系统公共根验证通过。
