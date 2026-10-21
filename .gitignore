@@ -28,3 +28,6 @@ ehthumbs.db
 !.vscode/launch.json
 !.vscode/extensions.json
 *.code-workspace
+
+# Agent workspace (local-only runtime data, not project source)
+.workbuddy/

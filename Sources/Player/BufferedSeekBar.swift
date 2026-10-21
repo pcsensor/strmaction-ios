@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// 精致三层缓冲进度条 (BufferedSeekBar)
-/// 1. 底层：未缓冲轨道 rgba(255, 255, 255, 0.2)
-/// 2. 中层：已缓冲轨道 rgba(255, 255, 255, 0.5)
-/// 3. 顶层：已播放进度 #E8B06A，带 12pt 圆形滑块
-/// 4. 触摸区高度扩展至 36pt，确保触摸手感
+/// 三层缓冲进度条。
+///
+/// 对齐 Android 端 `BufferedSeekBar` 的视觉：未播放 30% 白、已缓冲 80% 白、已播放金橙，
+/// 外加一个同心双环滑块。两处关键改进：
+/// 1. 触摸区独立扩展到 44pt 高，不需要精准点在细轨道上；
+/// 2. 缓冲进度永远不会短于已播放进度（与 Android 的 coerceIn 一致），
+///    否则回放缓存收缩时会出现颜色闪烁。
 public struct BufferedSeekBar: View {
     public let currentMs: Int64
     public let durationMs: Int64
@@ -15,79 +17,87 @@ public struct BufferedSeekBar: View {
     @State private var isDragging: Bool = false
     @State private var dragPositionMs: Int64 = 0
 
-    public init(
-        currentMs: Int64,
-        durationMs: Int64,
-        bufferedMs: Int64,
-        onSeek: @escaping (Int64) -> Void,
-        onScrubbingChanged: ((Bool, Int64) -> Void)? = nil
-    ) {
-        self.currentMs = currentMs
-        self.durationMs = durationMs
-        self.bufferedMs = bufferedMs
-        self.onSeek = onSeek
-        self.onScrubbingChanged = onScrubbingChanged
+    private var playedRatio: Double {
+        guard durationMs > 0 else { return 0 }
+        return min(1, max(0, Double(currentMs) / Double(durationMs)))
     }
 
-    private var activePositionMs: Int64 {
-        isDragging ? dragPositionMs : currentMs
+    private var bufferedRatio: Double {
+        guard durationMs > 0 else { return 0 }
+        let raw = min(1, max(0, Double(bufferedMs) / Double(durationMs)))
+        // 缓冲进度至少等于已播放进度，避免已播部分被画成「未播放」的灰白色。
+        return max(raw, playedRatio)
     }
 
     public var body: some View {
         GeometryReader { geometry in
-            let totalDuration = max(1, durationMs)
             let width = geometry.size.width
-            let playedRatio = min(1.0, max(0.0, Double(activePositionMs) / Double(totalDuration)))
-            let bufferedRatio = min(1.0, max(0.0, Double(bufferedMs) / Double(totalDuration)))
+            let trackWidth = max(0, width)
+            let knobDiameter: CGFloat = isDragging ? 16 : 12
+            let trackHeight: CGFloat = isDragging ? 6 : PlayerTheme.seekTrackHeight
+            // 滑块中心要内缩半个直径，否则首尾位置会溢出轨道。
+            let usableWidth = max(0, trackWidth - knobDiameter)
+            let playedX = usableWidth * CGFloat(playedRatio)
 
             ZStack(alignment: .leading) {
-                // 触摸热区
-                Color.clear
-                    .frame(height: 36)
-                    .contentShape(Rectangle())
-
-                // 1. 底层未缓冲轨道
+                // 1. 未播放轨道
                 Capsule()
-                    .fill(Color.white.opacity(0.2))
-                    .frame(height: 3)
+                    .fill(PlayerTheme.trackUnplayed)
+                    .frame(width: trackWidth, height: trackHeight)
 
-                // 2. 中层已缓冲轨道
+                // 2. 已缓冲轨道
                 Capsule()
-                    .fill(Color.white.opacity(0.5))
-                    .frame(width: max(0, width * CGFloat(bufferedRatio)), height: 3)
+                    .fill(PlayerTheme.trackBuffered)
+                    .frame(width: max(0, usableWidth * CGFloat(bufferedRatio) + knobDiameter / 2), height: trackHeight)
 
-                // 3. 顶层已播放轨道
+                // 3. 已播放轨道
                 Capsule()
-                    .fill(Color(hex: "#E8B06A"))
-                    .frame(width: max(0, width * CGFloat(playedRatio)), height: 3)
+                    .fill(PlayerTheme.accent)
+                    .frame(width: max(0, playedX + knobDiameter / 2), height: trackHeight)
 
-                // 4. 滑块 (Knob)
-                Circle()
-                    .fill(Color(hex: "#E8B06A"))
-                    .frame(width: isDragging ? 16 : 12, height: isDragging ? 16 : 12)
-                    .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
-                    .offset(x: max(0, min(width - (isDragging ? 16 : 12), width * CGFloat(playedRatio) - (isDragging ? 8 : 6))))
+                // 4. 滑块：外环金橙 + 内芯白色，拖动时轻微放大
+                ZStack {
+                    Circle()
+                        .fill(PlayerTheme.accent)
+                        .frame(width: knobDiameter, height: knobDiameter)
+                        .shadow(color: .black.opacity(0.45), radius: 3, x: 0, y: 1)
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: max(4, knobDiameter * 0.42), height: max(4, knobDiameter * 0.42))
+                }
+                .offset(x: playedX)
+                .animation(.easeOut(duration: 0.14), value: isDragging)
+                // 只有非拖动状态才做进度补间，拖动时必须 1:1 跟手。
+                .animation(.linear(duration: 0.12), value: playedRatio)
             }
+            .frame(width: trackWidth, height: PlayerTheme.seekBarHeight)
+            .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        isDragging = true
-                        let clampedX = max(0, min(width, value.location.x))
-                        let ratio = clampedX / width
-                        let newMs = Int64(Double(totalDuration) * Double(ratio))
-                        dragPositionMs = newMs
-                        onScrubbingChanged?(true, newMs)
+                        if !isDragging {
+                            isDragging = true
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                        let target = positionMs(for: value.location.x, usableWidth: usableWidth)
+                        dragPositionMs = target
+                        onScrubbingChanged?(true, target)
                     }
                     .onEnded { value in
-                        let clampedX = max(0, min(width, value.location.x))
-                        let ratio = clampedX / width
-                        let targetMs = Int64(Double(totalDuration) * Double(ratio))
+                        let target = positionMs(for: value.location.x, usableWidth: usableWidth)
                         isDragging = false
-                        onScrubbingChanged?(false, targetMs)
-                        onSeek(targetMs)
+                        dragPositionMs = 0
+                        onScrubbingChanged?(false, target)
+                        onSeek(target)
                     }
             )
         }
-        .frame(height: 36)
+        .frame(height: PlayerTheme.seekBarHeight)
+    }
+
+    private func positionMs(for x: CGFloat, usableWidth: CGFloat) -> Int64 {
+        guard durationMs > 0, usableWidth > 0 else { return 0 }
+        let ratio = min(1, max(0, Double(x / usableWidth)))
+        return Int64(Double(durationMs) * ratio)
     }
 }
