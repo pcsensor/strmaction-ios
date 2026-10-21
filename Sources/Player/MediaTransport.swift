@@ -15,8 +15,37 @@ enum MediaTransport {
 
         let options = KSOptions()
 
-        // 1. 请求头：服务端下发的（UA / Referer / Cookie 等）原样带给 FFmpeg。
-        options.appendHeader(request.headers)
+        // 1. 请求头
+        //
+        //    刻意不用 options.appendHeader()：它拼的是 "Key:Value\r\n"（冒号后没有空格），
+        //    而 FFmpeg 的 http 协议用 has_header(s->headers, "\r\nUser-Agent: ") 判断
+        //    是否已经带了 UA —— 那个判断是**带空格**的（has_header 内部只做
+        //    av_stristart("/User-Agent: ") 与 av_stristr("\r\nUser-Agent: ")）。
+        //    匹配不上时 FFmpeg 会再发一遍默认 UA（Lavf/x.y），请求里于是出现两个
+        //    User-Agent，源站取第一个就拒了。
+        //
+        //    实测（同一 302 目标，1 字节 Range）：
+        //      · 只有 pan.baidu.com          → 206
+        //      · Lavf/60.16.100 + pan.baidu  → 403
+        //      · 只有 Lavf/60.16.100         → 403
+        //
+        //    所以 UA 交给 http 协议的 user_agent 选项做唯一来源（它会生成格式正确、
+        //    且只有一条的 User-Agent），其余头按 "Key: Value" 自己拼。
+        let userAgent = request.headers
+            .first { $0.key.lowercased() == "user-agent" }?
+            .value
+        if let userAgent, !userAgent.isEmpty {
+            options.formatContextOptions["user_agent"] = userAgent
+        }
+
+        var headerLines = ""
+        for (key, value) in request.headers.sorted(by: { $0.key < $1.key })
+        where key.lowercased() != "user-agent" && !value.isEmpty {
+            headerLines += "\(key): \(value)\r\n"
+        }
+        if !headerLines.isEmpty {
+            options.formatContextOptions["headers"] = headerLines
+        }
 
         // 2. TLS：真实的链校验，不是关闭校验。
         //    ca_file 会替换 FFmpeg 的默认信任库，因此 bundle 内同时包含
@@ -61,11 +90,18 @@ enum MediaTransport {
 
         let bundleAttrs = try? FileManager.default.attributesOfItem(atPath: caBundlePath)
         let bundleSize = (bundleAttrs?[.size] as? NSNumber)?.intValue ?? 0
+        // 真机验证看这一行：UA 必须是服务端下发的那个值，
+        // 若显示「默认」说明服务端没下发 UA，FFmpeg 会用 Lavf/xx → 源站可能 403。
+        let injectedUA = (options.formatContextOptions["user_agent"] as? String) ?? "默认"
+        let extraHeaders = request.headers.keys
+            .filter { $0.lowercased() != "user-agent" }
+            .sorted()
+            .joined(separator: ",")
         D.log("transport", "options ca_file=\(caBundlePath.split(separator: "/").last ?? "-") "
             + "存在=\(FileManager.default.fileExists(atPath: caBundlePath)) 大小=\(bundleSize) "
             + "受信任根=\(TLSTrustStore.shared.snapshot().count) "
             + "cache=\(options.cache) maxBuffer=\(options.maxBufferDuration)s "
-            + "probesize=1MB 请求头=\(request.headers.keys.sorted().joined(separator: ","))")
+            + "UA=\(injectedUA) 额外头=\(extraHeaders.isEmpty ? "无" : extraHeaders)")
 
         return options
     }
