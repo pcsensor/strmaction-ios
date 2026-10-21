@@ -82,7 +82,12 @@ enum MediaTransport {
         //      而 https URL 在 MEPlayerItem 里直接跳过该前缀，设了也没用；
         //    - preferredForwardBufferDuration：只被 KSAVPlayer 读取，
         //      单一内核是 KSMEPlayer，它永远读不到这里。
-        let bufferSeconds = max(5, min(600, request.bufferTargetSeconds))
+        //    「MB → 秒」用上一次观测到的码率折算；ready 之后
+        //    VideoPlayerAdapter 会拿真实码率再校一次（同一个 KSOptions 实例）。
+        let bufferSeconds = PlaybackBufferPreference.seconds(
+            limitMb: request.bufferLimitMb,
+            bitRate: PlaybackBufferPreference.observedBitRate
+        )
         options.maxBufferDuration = bufferSeconds
 
         // 7. 单一内核。
@@ -105,7 +110,7 @@ enum MediaTransport {
         D.log("transport", "options ca_file=\(caBundlePath.split(separator: "/").last ?? "-") "
             + "存在=\(FileManager.default.fileExists(atPath: caBundlePath)) 大小=\(bundleSize) "
             + "受信任根=\(TLSTrustStore.shared.snapshot().count) "
-            + "缓冲目标=\(Int(bufferSeconds))s "
+            + "缓冲目标=\(Int(bufferSeconds))s(\(request.bufferLimitMb)MB) "
             + "UA=\(injectedUA) 额外头=\(extraHeaders.isEmpty ? "无" : extraHeaders)")
 
         return options

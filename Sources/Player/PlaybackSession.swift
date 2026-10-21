@@ -45,18 +45,18 @@ public struct PlaybackRequest: Equatable {
     public let url: URL
     public let headers: [String: String]
     public let resumeMs: Int64
-    /// 缓冲目标时长（秒）。
+    /// 缓冲上限（MB）。
     ///
-    /// 用时间而不是 MB：KSPlayer 的缓冲控制本来就是时间维度——
-    /// `MEPlayerItem` 拿解码容量层的 `loadedTime` 与 `options.maxBufferDuration`
-    /// 比较来决定暂停/恢复读取。MB 只有在知道码率时才能折算成时间，绕一圈还会算错。
-    public let bufferTargetSeconds: Double
+    /// 用户按容量设置，引擎按时间执行：`MEPlayerItem` 拿 `loadedTime` 与
+    /// `options.maxBufferDuration` 比较来决定暂停/恢复读取。
+    /// 两者之间靠码率折算，见 `PlaybackBufferPreference.seconds(limitMb:bitRate:)`。
+    public let bufferLimitMb: Int
 
-    public init(url: URL, headers: [String: String], resumeMs: Int64, bufferTargetSeconds: Double) {
+    public init(url: URL, headers: [String: String], resumeMs: Int64, bufferLimitMb: Int) {
         self.url = url
         self.headers = headers
         self.resumeMs = resumeMs
-        self.bufferTargetSeconds = bufferTargetSeconds
+        self.bufferLimitMb = bufferLimitMb
     }
 
     /// 从服务端响应构造。URL 非法时返回 nil。
@@ -65,26 +65,66 @@ public struct PlaybackRequest: Equatable {
         self.url = url
         self.headers = playInfo.safeHeaders
         self.resumeMs = max(0, playInfo.resumeMs)
-        self.bufferTargetSeconds = PlaybackBufferPreference.seconds
+        self.bufferLimitMb = PlaybackBufferPreference.limitMb
     }
 }
 
 // MARK: - 缓冲偏好
 
-/// 缓冲目标时长的唯一来源。
+/// 缓冲设置的唯一来源：**按 MB 配置，按秒执行**。
 ///
-/// 服务端下发的 `cache_limit_mb` 不再参与：那个值是 MB，而真正起作用的
-/// `maxBufferDuration` 是秒，中间缺一个码率，硬换算只会得到一个没有意义的数字。
-/// 想要磁盘级缓存得先让 KSPlayer 的 `async:cache:` 协议对 https 生效，那是另一件事。
+/// - 用户输入的是容量（MB），因为那才是他关心的"占多少内存"；
+/// - 引擎需要的是时间（秒），因为 `maxBufferDuration` 是时间窗口；
+/// - 两者靠码率换算：`秒 = MB × 8 × 1024 × 1024 ÷ 码率bps`。
+///
+/// 码率必须等 `avformat_open_input` 解析完轨道才有，所以首帧之前先用
+/// 上一次观测到的码率估算（`observedBitRate`），ready 之后再用真实值校正。
 enum PlaybackBufferPreference {
-    static let defaultsKey = "buffer_target_seconds"
-    /// 设置页可选项（秒）。
-    static let options: [Double] = [15, 30, 60, 120]
-    static let defaultSeconds: Double = 60
+    static let defaultsKey = "buffer_limit_mb"
+    /// 设置页固定档位（MB）。
+    static let presets: [Int] = [64, 128, 256, 512]
+    static let defaultLimitMb = 128
+    static let minLimitMb = 16
+    static let maxLimitMb = 4096
 
-    static var seconds: Double {
-        let value = UserDefaults.standard.double(forKey: defaultsKey)
-        guard value > 0 else { return defaultSeconds }
-        return min(600, max(5, value))
+    static var limitMb: Int {
+        let value = UserDefaults.standard.integer(forKey: defaultsKey)
+        guard value > 0 else { return defaultLimitMb }
+        return clamp(value)
+    }
+
+    static func clamp(_ value: Int) -> Int {
+        min(maxLimitMb, max(minLimitMb, value))
+    }
+
+    // MARK: 码率
+
+    private static let bitRateKey = "buffer_observed_bitrate"
+    /// 没有任何观测值时的保守估计。
+    static let fallbackBitRate: Double = 8_000_000
+
+    static var observedBitRate: Double {
+        let value = UserDefaults.standard.double(forKey: bitRateKey)
+        return value > 0 ? value : fallbackBitRate
+    }
+
+    static func rememberBitRate(_ bitRate: Double) {
+        guard bitRate.isFinite, bitRate > 0 else { return }
+        UserDefaults.standard.set(bitRate, forKey: bitRateKey)
+    }
+
+    // MARK: 换算
+
+    /// 把「缓冲上限 MB」折算成 `maxBufferDuration` 需要的秒数。
+    static func seconds(limitMb: Int, bitRate: Double) -> Double {
+        let bytes = Double(clamp(limitMb)) * 1024 * 1024
+        let rate = bitRate > 0 ? bitRate : fallbackBitRate
+        let raw = bytes * 8 / rate
+        return min(3600, max(5, raw))
+    }
+
+    /// 按最近观测到的码率折算当前设置。
+    static func secondsForCurrentLimit() -> Double {
+        seconds(limitMb: limitMb, bitRate: observedBitRate)
     }
 }

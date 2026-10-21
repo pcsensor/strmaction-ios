@@ -294,12 +294,12 @@ struct PlayerDrawerContent: View {
         return "已信任 \(trustStore.anchors.count) 个根证书"
     }
 
-    /// 播放点前方已经缓存了多少秒，以及当前的目标时长。
+    /// 播放点前方已经缓存了多少秒，以及按当前码率折算出的目标时长。
     /// 用「前方剩余」而不是「已缓冲到的时间点」，因为前者才直接回答「拖过去会不会卡」。
     private var bufferSubtitle: String {
         let aheadMs = max(0, player.bufferedPositionMs - player.currentPositionMs)
         let ahead = Int(aheadMs / 1000)
-        return "前方已缓存 \(ahead) 秒 · 目标 \(Int(player.bufferTargetSeconds)) 秒"
+        return "前方已缓存 \(ahead) 秒 · 目标 \(Int(player.bufferTargetSeconds)) 秒（\(player.bufferLimitMb) MB）"
     }
 
     var body: some View {

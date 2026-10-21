@@ -19,8 +19,10 @@ public final class VideoPlayerController: ObservableObject {
     @Published public private(set) var currentPositionMs: Int64 = 0
     @Published public private(set) var durationMs: Int64 = 0
     @Published public private(set) var bufferedPositionMs: Int64 = 0
-    /// 缓冲目标时长（秒）。面板里的实时读数与设置项都读它。
-    @Published public private(set) var bufferTargetSeconds: Double = PlaybackBufferPreference.defaultSeconds
+    /// 缓冲上限（MB），用户设置项。
+    @Published public private(set) var bufferLimitMb: Int = PlaybackBufferPreference.defaultLimitMb
+    /// 按码率折算出的实际目标时长（秒）。面板里的读数用它。
+    @Published public private(set) var bufferTargetSeconds: Double = PlaybackBufferPreference.secondsForCurrentLimit()
     @Published public var playbackSpeed: Double = 1.0
     @Published public var isAspectFill: Bool = false
     @Published public private(set) var errorMessage: String?
@@ -46,6 +48,9 @@ public final class VideoPlayerController: ObservableObject {
     private weak var boundPiPLayer: KSPlayerLayer?
 
     private var connectTimeoutTask: Task<Void, Never>?
+    /// 当前会话的选项实例。`KSOptions` 是引用类型，
+    /// ready 之后改 `maxBufferDuration` 会立刻被 `codecDidChangeCapacity` 读到。
+    private var activeOptions: KSOptions?
     /// 诊断节流：上次记录过的播放秒数。
     private var lastDiagnosticSecond: Int64 = -1
 
@@ -108,10 +113,15 @@ public final class VideoPlayerController: ObservableObject {
         ksCoordinator.resetPlayer()
 
         setupResumeMs = request.resumeMs
-        bufferTargetSeconds = request.bufferTargetSeconds
+        bufferLimitMb = request.bufferLimitMb
+        bufferTargetSeconds = PlaybackBufferPreference.seconds(
+            limitMb: request.bufferLimitMb,
+            bitRate: PlaybackBufferPreference.observedBitRate
+        )
         playbackURL = request.url
         installKSPlayerCallbacks()
         ksOptions = options
+        activeOptions = options
 
         phase = .connecting
         lastDiagnosticSecond = -1
@@ -334,6 +344,9 @@ public final class VideoPlayerController: ObservableObject {
 
         phase = .ready
 
+        // 轨道已经解析出来了，用真实码率把「MB → 秒」校正一次。
+        refreshBufferTarget()
+
         if setupResumeMs > 0 {
             let resume = setupResumeMs
             setupResumeMs = 0
@@ -341,6 +354,34 @@ public final class VideoPlayerController: ObservableObject {
         } else {
             play()
         }
+    }
+
+    /// 用真实码率把「缓冲上限 MB」折算成 `maxBufferDuration` 秒数。
+    ///
+    /// 必须在解析出轨道之后才能算：`avformat_open_input` 之前拿不到码率，
+    /// 所以 load 时先用上次观测到的码率估算，这里再用真实值校正。
+    /// 改的是同一个 `KSOptions` 实例，`codecDidChangeCapacity` 每轮都会读它，立即生效。
+    private func refreshBufferTarget() {
+        guard let player = ksCoordinator.playerLayer?.player else { return }
+
+        // 1. 视频轨码率（FFmpeg 的 codecpar.bit_rate），最准确
+        var bitRate = Double(
+            player.tracks(mediaType: .video)
+                .first(where: { $0.isEnabled })?
+                .bitRate ?? 0
+        )
+        // 2. 反推整体码率：KSPlayer 内部 fileSize = bit_rate × duration ÷ 8
+        if bitRate <= 0, player.duration > 0, player.fileSize > 0 {
+            bitRate = player.fileSize * 8 / player.duration
+        }
+        guard bitRate > 0, bitRate.isFinite else { return }
+
+        PlaybackBufferPreference.rememberBitRate(bitRate)
+        let seconds = PlaybackBufferPreference.seconds(limitMb: bufferLimitMb, bitRate: bitRate)
+        bufferTargetSeconds = seconds
+        activeOptions?.maxBufferDuration = seconds
+        D.log("buffer", "目标 \(Int(seconds))s = \(bufferLimitMb)MB @ "
+            + String(format: "%.1f", bitRate / 1_000_000) + "Mbps")
     }
 
     private func fail(_ reason: String) {
@@ -376,6 +417,7 @@ public final class VideoPlayerController: ObservableObject {
         currentPositionMs = 0
         durationMs = 0
         bufferedPositionMs = 0
+        activeOptions = nil
         isPiPActive = false
         subtitleText = nil
         errorMessage = nil

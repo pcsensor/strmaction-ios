@@ -2,7 +2,9 @@ import SwiftUI
 
 public struct SetupView: View {
     @AppStorage("server_url") private var serverUrl: String = ""
-    @AppStorage("buffer_target_seconds") private var bufferTargetSeconds: Double = PlaybackBufferPreference.defaultSeconds
+    @AppStorage("buffer_limit_mb") private var bufferLimitMb: Int = PlaybackBufferPreference.defaultLimitMb
+    @State private var isCustomBuffer = false
+    @State private var customBufferText = ""
     @State private var showTrust = false
     @ObservedObject var trustStore = TLSTrustStore.shared
     @Binding var isPresented: Bool
@@ -12,7 +14,7 @@ public struct SetupView: View {
     @State private var isTesting: Bool = false
     @State private var isSuccess: Bool = false
 
-    private let bufferTargetOptions = PlaybackBufferPreference.options
+    private let bufferTargetOptions = PlaybackBufferPreference.presets
 
     public init(isPresented: Binding<Bool>) {
         self._isPresented = isPresented
@@ -75,23 +77,54 @@ public struct SetupView: View {
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(Color(hex: "#8A93A5"))
 
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("缓冲目标")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(.white)
-                                Text("提前读取多少秒的媒体数据")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(Color(hex: "#8A93A5"))
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("缓冲大小")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.white)
+                                    Text("按容量设置，实际预读时长取决于片源码率")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color(hex: "#8A93A5"))
+                                }
+                                Spacer()
+                                Picker("缓冲大小", selection: bufferSelection) {
+                                    ForEach(bufferTargetOptions, id: \.self) { mb in
+                                        Text("\(mb) MB").tag(mb)
+                                    }
+                                    Text("自定义…").tag(-1)
+                                }
+                                .pickerStyle(.menu)
+                                .tint(Color(hex: "#E8B06A"))
                             }
-                            Spacer()
-                            Picker("缓冲目标", selection: $bufferTargetSeconds) {
-                                ForEach(bufferTargetOptions, id: \.self) { seconds in
-                                    Text("\(Int(seconds)) 秒").tag(seconds)
+
+                            if isCustomBuffer {
+                                HStack(spacing: 8) {
+                                    TextField("MB", text: $customBufferText)
+                                        .keyboardType(.numberPad)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 88)
+                                    Text("MB（\(PlaybackBufferPreference.minLimitMb)–\(PlaybackBufferPreference.maxLimitMb)）")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(Color(hex: "#8A93A5"))
+                                    Spacer()
+                                    Button("应用") {
+                                        if let value = Int(customBufferText) {
+                                            bufferLimitMb = PlaybackBufferPreference.clamp(value)
+                                            customBufferText = "\(bufferLimitMb)"
+                                            isCustomBuffer = false
+                                        }
+                                    }
+                                    .font(.system(size: 13, weight: .medium))
+                                    .tint(Color(hex: "#E8B06A"))
+                                    .disabled(Int(customBufferText) == nil)
                                 }
                             }
-                            .pickerStyle(.menu)
-                            .tint(Color(hex: "#E8B06A"))
+
+                            Text("当前 \(bufferLimitMb) MB，按最近片源码率约 "
+                                + "\(Int(PlaybackBufferPreference.seconds(limitMb: bufferLimitMb, bitRate: PlaybackBufferPreference.observedBitRate))) 秒")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#8A93A5"))
                         }
                         .padding()
                         .background(Color(hex: "#14161C"))
@@ -168,10 +201,29 @@ public struct SetupView: View {
             if !serverUrl.isEmpty {
                 isSuccess = true
             }
+            // 上次存的是自定义值时，直接把输入框展开
+            isCustomBuffer = !PlaybackBufferPreference.presets.contains(bufferLimitMb)
+            customBufferText = "\(bufferLimitMb)"
         }
         .sheet(isPresented: $showTrust) {
             TrustManagementView()
         }
+    }
+
+    /// 固定档位与「自定义」共用一个 Picker：-1 表示自定义。
+    private var bufferSelection: Binding<Int> {
+        Binding(
+            get: { PlaybackBufferPreference.presets.contains(bufferLimitMb) ? bufferLimitMb : -1 },
+            set: { newValue in
+                if newValue == -1 {
+                    customBufferText = "\(bufferLimitMb)"
+                    isCustomBuffer = true
+                } else {
+                    isCustomBuffer = false
+                    bufferLimitMb = newValue
+                }
+            }
+        )
     }
 
     /// 证书信任摘要，展示当前已导入的根证书数量。

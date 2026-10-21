@@ -117,8 +117,6 @@ final class PlayerUIController: ObservableObject {
     /// 进度条正在被拖动（横向手势不算，两者取或）。
     private var isBarScrubbing = false
     private var hasInitializedVolume = false
-    /// 锁定前的播放状态，用于解锁后决定是否续播。
-    private var wasPlayingBeforeLock = false
 
     private var hideTimer: Timer?
     private var lockButtonTimer: Timer?
@@ -241,17 +239,12 @@ final class PlayerUIController: ObservableObject {
             withAnimation(.easeOut(duration: 0.2)) {
                 isControlsVisible = false
             }
-            // 记录锁定前的播放状态，解锁时才能判断要不要续播。
-            wasPlayingBeforeLock = player?.isPlaying ?? false
-            player?.pause()
+            // 锁定只锁控件，不动播放状态。之前这里 pause() 再在解锁时 play()，
+            // 等于把「防误触」做成了「暂停」，锁一下画面就停一帧。
             scheduleLockButtonHide()
         } else {
             hideLockButton()
             showControls()
-            if wasPlayingBeforeLock {
-                player?.play()
-            }
-            wasPlayingBeforeLock = false
         }
     }
 
@@ -559,7 +552,6 @@ final class PlayerUIController: ObservableObject {
         isFullscreen = false
         gestureMode = .none
         isBarScrubbing = false
-        wasPlayingBeforeLock = false
         dismissAllTimers()
     }
 
