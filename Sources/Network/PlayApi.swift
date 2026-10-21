@@ -23,8 +23,32 @@ public enum PlayApiError: LocalizedError {
             }
             return "网络连接失败: \(details)"
         case .decodingError(let error):
-            return "数据解析失败: \(error.localizedDescription)"
+            guard let decodingError = error as? DecodingError else {
+                return "数据解析失败: \(error.localizedDescription)"
+            }
+            switch decodingError {
+            case .keyNotFound(let key, let context):
+                let path = Self.codingPath(context.codingPath + [key])
+                return "数据解析失败: 缺少字段 \(path)"
+            case .typeMismatch(let type, let context):
+                let path = Self.codingPath(context.codingPath)
+                return "数据解析失败: 字段 \(path) 类型不匹配，期望 \(type)"
+            case .valueNotFound(let type, let context):
+                let path = Self.codingPath(context.codingPath)
+                return "数据解析失败: 字段 \(path) 缺少值，期望 \(type)"
+            case .dataCorrupted(let context):
+                let path = Self.codingPath(context.codingPath)
+                let suffix = path.isEmpty ? "" : "（字段 \(path)）"
+                return "数据解析失败: \(context.debugDescription)\(suffix)"
+            @unknown default:
+                return "数据解析失败: \(decodingError.localizedDescription)"
+            }
         }
+    }
+
+    private static func codingPath(_ path: [CodingKey]) -> String {
+        let value = path.map { $0.stringValue }.joined(separator: ".")
+        return value.isEmpty ? "<root>" : value
     }
 }
 
@@ -131,7 +155,8 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
-        request.setValue("StrmActionCompanion/1.0.0 (iOS; Darwin)", forHTTPHeaderField: "User-Agent")
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        request.setValue("StrmActionCompanion/\(appVersion) (iOS; Darwin)", forHTTPHeaderField: "User-Agent")
 
         if let cookie = cookieString, !cookie.isEmpty {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
@@ -165,8 +190,8 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
         }
     }
 
-    /// 下载外挂字幕文本
-    public func fetchSubtitleContent(serverUrl: String, subtitlePath: String, allowInsecure: Bool? = nil) async throws -> String {
+    /// 下载外挂字幕原始数据（支持自签名证书的服务端）
+    public func fetchSubtitleData(serverUrl: String, subtitlePath: String, allowInsecure: Bool? = nil) async throws -> Data {
         let fullUrlString: String
         if subtitlePath.lowercased().hasPrefix("http://") || subtitlePath.lowercased().hasPrefix("https://") {
             fullUrlString = subtitlePath
@@ -187,11 +212,26 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
         request.httpMethod = "GET"
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw PlayApiError.badResponse(statusCode: 0, message: "字幕下载失败")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw PlayApiError.badResponse(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "字幕下载失败")
+            }
+            return data
+        } catch let err as PlayApiError {
+            throw err
+        } catch {
+            throw PlayApiError.networkError(error)
         }
+    }
 
+    /// 下载外挂字幕文本
+    public func fetchSubtitleContent(serverUrl: String, subtitlePath: String, allowInsecure: Bool? = nil) async throws -> String {
+        let data = try await fetchSubtitleData(
+            serverUrl: serverUrl,
+            subtitlePath: subtitlePath,
+            allowInsecure: allowInsecure
+        )
         return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
     }
 }

@@ -51,6 +51,9 @@ struct StrmActionApp: App {
                         self.fetchAndPlay(itemId: nextId)
                     }
                 )
+                // fullScreenCover(item:) 在 item 变化时不一定会重新触发 onAppear，
+                // 用 itemId 强制重建播放器，确保切集时重新 setup 播放器与定时器。
+                .id(playInfo.itemId)
             }
             .alert("提示", isPresented: Binding(
                 get: { errorMessage != nil },
@@ -137,10 +140,21 @@ struct StrmActionApp: App {
 
     private func extractCookies() async -> String {
         guard let wv = webViewRef else { return "" }
+        guard let host = URL(string: serverUrl)?.host?.lowercased(), !host.isEmpty else {
+            return ""
+        }
+
         let store = wv.configuration.websiteDataStore.httpCookieStore
         let cookies = await store.allCookies()
-        let cookiePairs = cookies.map { "\($0.name)=\($0.value)" }
-        return cookiePairs.joined(separator: "; ")
+        let relevantCookies = cookies.filter { cookie in
+            let domain = cookie.domain
+                .lowercased()
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            guard !domain.isEmpty else { return false }
+            return host == domain || host.hasSuffix(".\(domain)")
+        }
+
+        return HTTPCookie.requestHeaderFields(with: relevantCookies)["Cookie"] ?? ""
     }
 }
 

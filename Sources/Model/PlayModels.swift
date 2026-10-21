@@ -18,7 +18,8 @@ public struct PlayResponse: Codable {
     public let headers: [String: String]?
     public let headersHint: String?
     public let playToken: String
-    public let playTokenExpiresAt: Double?
+    /// 服务端返回 ISO-8601 字符串（如 "2026-10-21T12:34:56+00:00"），不能按 Double 解码。
+    public let playTokenExpiresAt: String?
     public let progressIntervalMs: Int64?
     public let cacheLimitMb: Int?
     public let fallbackOnError: Bool?
@@ -81,14 +82,12 @@ public struct PlayResponse: Codable {
         cacheLimitMb ?? 128
     }
 
-    /// 组合格式化标题：{系列名称} {季集编号} {单集标题}
+    /// 组合格式化标题：{系列名称} {单集标题}
+    /// 服务端返回的单集 title 通常已经包含系列名称，避免重复拼接。
     public var fullDisplayTitle: String {
         var parts: [String] = []
-        if let sTitle = seriesTitle, !sTitle.isEmpty {
+        if let sTitle = seriesTitle, !sTitle.isEmpty, !title.contains(sTitle) {
             parts.append(sTitle)
-        }
-        if let epCode = nextEpisodeCode, !epCode.isEmpty {
-            // 如果自身有对应的当前集号，也可优先使用
         }
         parts.append(title)
         return parts.joined(separator: " ")

@@ -18,12 +18,13 @@ public final class StrmActionBridge: NSObject, WKScriptMessageHandler {
 
     /// 生成在 document_start 注入的 JS 脚本
     public func userScript() -> WKUserScript {
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let scriptSource = """
         (function() {
             window.StrmActionNative = {
                 isCompanion: function() { return true; },
                 isTV: function() { return false; },
-                version: function() { return "1.0.0"; },
+                version: function() { return "\(appVersion)"; },
                 serverHost: function() { return "\(allowedHost)"; },
                 play: function(itemId) {
                     window.webkit.messageHandlers.\(Self.messageHandlerName).postMessage({

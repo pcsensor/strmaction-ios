@@ -34,6 +34,12 @@ public struct WebContainerView: UIViewRepresentable {
         config.allowsInlineMediaPlayback = true
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
+        // 让 WKWebView 的所有请求（包括页面内 fetch）都携带伴侣 App 标识。
+        // 服务端通过 UA 中的 StrmActionCompanion 判定原生播放器能力；
+        // 初始导航的 X-StrmAction-Companion 头不会被页面内 fetch 继承。
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        config.applicationNameForUserAgent = "StrmActionCompanion/\(appVersion)"
+
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator

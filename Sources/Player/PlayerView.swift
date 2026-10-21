@@ -1,8 +1,14 @@
 import SwiftUI
 import AVFoundation
 import MediaPlayer
+import Combine
 
 public struct PlayerView: View {
+    private struct RemoteRegistration {
+        let command: MPRemoteCommand
+        let token: Any
+    }
+
     public let playInfo: PlayResponse
     public let serverUrl: String
     public var onClose: () -> Void
@@ -25,7 +31,12 @@ public struct PlayerView: View {
     @State private var brightnessLevel: Double = Double(UIScreen.main.brightness)
     @State private var showBrightnessOverlay: Bool = false
     @State private var showVolumeOverlay: Bool = false
-    @State private var volumeLevel: Double = 1.0
+    @State private var panStartBrightness: Double? = nil
+    @State private var panStartVolume: Double? = nil
+
+    // 字幕
+    @State private var selectedSubtitleId: String? = nil
+    @State private var subtitleLoadTask: Task<Void, Never>? = nil
 
     // 超时与自动连播状态
     @State private var showTimeoutAlert: Bool = false
@@ -40,6 +51,7 @@ public struct PlayerView: View {
     @State private var hideControlsTimer: Timer?
     @State private var loadingTimeoutTimer: Timer?
     @State private var autoNextTimer: Timer?
+    @State private var remoteRegistrations: [RemoteRegistration] = []
 
     private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
     private let longPressSpeeds: [Double] = [1.5, 2.0, 2.5, 3.0]
@@ -129,10 +141,48 @@ public struct PlayerView: View {
                     .transition(.opacity)
                 }
 
-                // 6. 交互手势层
+                if showVolumeOverlay {
+                    VStack {
+                        Image(systemName: playerController.volume <= 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .foregroundColor(Color(hex: "#E8B06A"))
+                        ProgressView(value: playerController.volume, total: 1.0)
+                            .tint(Color(hex: "#E8B06A"))
+                            .frame(width: 80)
+                        Text("\(Int(playerController.volume * 100))%")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white)
+                    }
+                    .padding(12)
+                    .background(Color.black.opacity(0.75))
+                    .cornerRadius(10)
+                    .position(x: geometry.size.width - 60, y: geometry.size.height / 2)
+                    .transition(.opacity)
+                }
+
+                // 6. 外挂字幕渲染层
+                if let subtitle = playerController.subtitleText {
+                    VStack {
+                        Spacer()
+                        Text(subtitle)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(4)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.black.opacity(0.55))
+                            .cornerRadius(6)
+                            .shadow(color: .black.opacity(0.9), radius: 2, x: 0, y: 1)
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, 96)
+                    }
+                    .allowsHitTesting(false)
+                }
+
+                // 7. 交互手势层
                 gestureOverlay(geometry: geometry)
 
-                // 7. 控制层 (TopBar, CenterButton, BottomBar)
+                // 8. 控制层 (TopBar, CenterButton, BottomBar)
                 if isControlsVisible {
                     VStack {
                         topBar
@@ -156,12 +206,12 @@ public struct PlayerView: View {
                     .transition(.opacity)
                 }
 
-                // 8. 播完即将连播下一集过渡浮层
+                // 9. 播完即将连播下一集过渡浮层
                 if showAutoNextOverlay {
                     autoNextEpisodeOverlay
                 }
 
-                // 9. 40% 右侧侧滑抽屉（选集 / 倍速 / 更多设置）
+                // 10. 40% 右侧侧滑抽屉（选集 / 倍速 / 更多设置）
                 if showEpisodesDrawer || showSpeedDrawer || showMoreSettingsDrawer {
                     HStack(spacing: 0) {
                         // 左侧 60% 遮罩区域，点击平滑收回
@@ -186,6 +236,11 @@ public struct PlayerView: View {
                     }
                     .transition(.move(edge: .trailing))
                 }
+
+                // 11. 播放错误提示（覆盖控制层，避免错误被静默忽略）
+                if let message = playerController.errorMessage {
+                    errorOverlay(message)
+                }
             }
         }
         .onAppear {
@@ -196,6 +251,18 @@ public struct PlayerView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             sendProgress(finished: false)
+        }
+        .onReceive(playerController.$isReady.removeDuplicates()) { ready in
+            if ready {
+                showTimeoutAlert = false
+                // KSPlayer 图层创建/重建后重新注册 App 自己的远程控制处理器。
+                setupRemoteCommands()
+            }
+        }
+        .onReceive(playerController.$errorMessage.removeDuplicates()) { message in
+            if message != nil {
+                showTimeoutAlert = false
+            }
         }
         .alert("连接提示", isPresented: $showTimeoutAlert) {
             Button("重试连接") {
@@ -276,13 +343,24 @@ public struct PlayerView: View {
             let sign = scrubDeltaSeconds >= 0 ? "+" : ""
             scrubPreviewText = "\(sign)\(scrubDeltaSeconds)s (\(formatTime(previewTarget)))"
         } else if abs(translation.height) > 20 {
-            // 垂直滑动：左半屏调亮度
+            // 垂直滑动：左半屏调亮度，右半屏调音量
             if value.startLocation.x < geometry.size.width * 0.5 {
+                if panStartBrightness == nil {
+                    panStartBrightness = brightnessLevel
+                }
                 let delta = Double(-translation.height / 300)
-                let newBrightness = max(0.0, min(1.0, brightnessLevel + delta))
+                let newBrightness = max(0.0, min(1.0, (panStartBrightness ?? brightnessLevel) + delta))
                 UIScreen.main.brightness = CGFloat(newBrightness)
                 brightnessLevel = newBrightness
                 showBrightnessOverlay = true
+            } else {
+                if panStartVolume == nil {
+                    panStartVolume = playerController.volume
+                }
+                let delta = Double(-translation.height / 300)
+                let newVolume = max(0.0, min(1.0, (panStartVolume ?? playerController.volume) + delta))
+                playerController.setVolume(newVolume)
+                showVolumeOverlay = true
             }
         }
     }
@@ -294,8 +372,11 @@ public struct PlayerView: View {
             playerController.skip(seconds: scrubDeltaSeconds)
             scrubPreviewText = nil
         }
+        panStartBrightness = nil
+        panStartVolume = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             showBrightnessOverlay = false
+            showVolumeOverlay = false
         }
         if isFastForwarding {
             triggerLongPressSpeed(false)
@@ -335,9 +416,14 @@ public struct PlayerView: View {
 
             // 画中画按钮 (PiP)
             Button(action: {
-                showFeedback("已进入后台画中画模式")
+                if playerController.togglePiP() {
+                    showFeedback(playerController.isPiPActive ? "已开启画中画" : "已退出画中画")
+                } else {
+                    showFeedback("当前设备或播放器不支持画中画")
+                }
+                resetControlsTimer()
             }) {
-                Image(systemName: "pip.enter")
+                Image(systemName: playerController.isPiPActive ? "pip.exit" : "pip.enter")
                     .font(.system(size: 17))
                     .foregroundColor(.white)
                     .padding(6)
@@ -607,16 +693,40 @@ public struct PlayerView: View {
                                 .foregroundColor(.gray)
                                 .padding(.vertical, 4)
                         } else {
+                            if selectedSubtitleId != nil {
+                                Button(action: {
+                                    selectedSubtitleId = nil
+                                    subtitleLoadTask?.cancel()
+                                    subtitleLoadTask = nil
+                                    playerController.clearSubtitle()
+                                    showFeedback("已关闭字幕")
+                                    withAnimation { showMoreSettingsDrawer = false }
+                                }) {
+                                    HStack {
+                                        Image(systemName: "captions.bubble")
+                                        Text("关闭字幕")
+                                            .font(.system(size: 13))
+                                        Spacer()
+                                    }
+                                    .foregroundColor(Color(hex: "#E8B06A"))
+                                    .padding(.vertical, 6)
+                                }
+                            }
+
                             ForEach(playInfo.safeSubtitles) { sub in
                                 Button(action: {
-                                    showFeedback("已选择字幕: \(sub.label)")
-                                    withAnimation { showMoreSettingsDrawer = false }
+                                    selectSubtitle(sub)
                                 }) {
                                     HStack {
                                         Text(sub.label)
                                             .font(.system(size: 13))
-                                            .foregroundColor(.white)
+                                            .foregroundColor(selectedSubtitleId == sub.id ? Color(hex: "#E8B06A") : .white)
                                         Spacer()
+                                        if selectedSubtitleId == sub.id {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundColor(Color(hex: "#E8B06A"))
+                                        }
                                         if let fmt = sub.format {
                                             Text(fmt.uppercased())
                                                 .font(.system(size: 10, weight: .bold))
@@ -672,6 +782,89 @@ public struct PlayerView: View {
         }
     }
 
+    private func selectSubtitle(_ subtitle: SubtitleEntry) {
+        if selectedSubtitleId == subtitle.id {
+            selectedSubtitleId = nil
+            subtitleLoadTask?.cancel()
+            subtitleLoadTask = nil
+            playerController.clearSubtitle()
+            showFeedback("已关闭字幕")
+            withAnimation { showMoreSettingsDrawer = false }
+            return
+        }
+
+        subtitleLoadTask?.cancel()
+        selectedSubtitleId = subtitle.id
+        showFeedback("正在加载字幕: \(subtitle.label)")
+        withAnimation { showMoreSettingsDrawer = false }
+
+        subtitleLoadTask = Task { @MainActor in
+            do {
+                try await playerController.loadSubtitle(subtitle, serverUrl: serverUrl)
+                if !Task.isCancelled {
+                    showFeedback("已选择字幕: \(subtitle.label)")
+                }
+            } catch is CancellationError {
+                // 用户已切换到别的字幕或关闭字幕，无需提示。
+            } catch {
+                if !Task.isCancelled {
+                    selectedSubtitleId = nil
+                    playerController.clearSubtitle()
+                    showFeedback("字幕加载失败: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func errorOverlay(_ message: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.82).ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 34))
+                    .foregroundColor(Color(hex: "#E8B06A"))
+
+                Text("播放失败")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundColor(Color(hex: "#B8C0CF"))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(5)
+
+                HStack(spacing: 12) {
+                    Button("重试") {
+                        restartPlayback()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 9)
+                    .background(Color(hex: "#E8B06A"))
+                    .foregroundColor(Color(hex: "#07080A"))
+                    .fontWeight(.semibold)
+                    .cornerRadius(8)
+
+                    Button("关闭") {
+                        handleClose()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 9)
+                    .background(Color(hex: "#1E222D"))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                }
+                .padding(.top, 4)
+            }
+            .padding(24)
+            .background(Color(hex: "#14161C").opacity(0.98))
+            .cornerRadius(14)
+            .shadow(color: .black.opacity(0.5), radius: 20)
+            .padding(32)
+        }
+    }
+
     // MARK: - 自动连播下一集过渡
 
     private var autoNextEpisodeOverlay: some View {
@@ -722,16 +915,17 @@ public struct PlayerView: View {
         setupNowPlayingInfo()
         setupRemoteCommands()
 
+        playerController.onPlaybackEnded = {
+            self.handleVideoFinished()
+        }
+
         if let videoUrl = URL(string: playInfo.playUrl) {
             playerController.setup(
                 url: videoUrl,
                 headers: playInfo.safeHeaders,
-                resumeMs: playInfo.resumeMs
+                resumeMs: playInfo.resumeMs,
+                cacheLimitMb: playInfo.safeCacheLimitMb
             )
-        }
-
-        playerController.onPlaybackEnded = {
-            self.handleVideoFinished()
         }
 
         startHeartbeat()
@@ -761,42 +955,72 @@ public struct PlayerView: View {
     }
 
     private func setupRemoteCommands() {
+        removeRemoteCommands()
+
         let center = MPRemoteCommandCenter.shared()
-        center.playCommand.addTarget { _ in
+        var registrations: [RemoteRegistration] = []
+
+        let playToken = center.playCommand.addTarget { _ in
             self.playerController.play()
+            self.setupNowPlayingInfo()
             return .success
         }
-        center.pauseCommand.addTarget { _ in
+        registrations.append(RemoteRegistration(command: center.playCommand, token: playToken))
+
+        let pauseToken = center.pauseCommand.addTarget { _ in
             self.playerController.pause()
+            self.setupNowPlayingInfo()
             return .success
         }
-        center.togglePlayPauseCommand.addTarget { _ in
+        registrations.append(RemoteRegistration(command: center.pauseCommand, token: pauseToken))
+
+        let toggleToken = center.togglePlayPauseCommand.addTarget { _ in
             self.playerController.togglePlayPause()
+            self.setupNowPlayingInfo()
             return .success
         }
+        registrations.append(RemoteRegistration(command: center.togglePlayPauseCommand, token: toggleToken))
+
         center.skipForwardCommand.preferredIntervals = [10]
-        center.skipForwardCommand.addTarget { _ in
+        let forwardToken = center.skipForwardCommand.addTarget { _ in
             self.playerController.skip(seconds: 10)
+            self.setupNowPlayingInfo()
             return .success
         }
+        registrations.append(RemoteRegistration(command: center.skipForwardCommand, token: forwardToken))
+
         center.skipBackwardCommand.preferredIntervals = [10]
-        center.skipBackwardCommand.addTarget { _ in
+        let backwardToken = center.skipBackwardCommand.addTarget { _ in
             self.playerController.skip(seconds: -10)
+            self.setupNowPlayingInfo()
             return .success
         }
-        center.changePlaybackPositionCommand.addTarget { event in
+        registrations.append(RemoteRegistration(command: center.skipBackwardCommand, token: backwardToken))
+
+        let positionToken = center.changePlaybackPositionCommand.addTarget { event in
             if let posEvent = event as? MPChangePlaybackPositionCommandEvent {
                 self.playerController.seek(toMs: Int64(posEvent.positionTime * 1000))
+                self.setupNowPlayingInfo()
                 return .success
             }
             return .commandFailed
         }
+        registrations.append(RemoteRegistration(command: center.changePlaybackPositionCommand, token: positionToken))
+
+        remoteRegistrations = registrations
+    }
+
+    private func removeRemoteCommands() {
+        for registration in remoteRegistrations {
+            registration.command.removeTarget(registration.token)
+        }
+        remoteRegistrations.removeAll()
     }
 
     private func startLoadingTimeoutTimer() {
         loadingTimeoutTimer?.invalidate()
         loadingTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: false) { _ in
-            if !self.playerController.isReady && self.playerController.currentPositionMs == 0 {
+            if !self.playerController.isReady && self.playerController.errorMessage == nil {
                 self.showTimeoutAlert = true
             }
         }
@@ -868,11 +1092,13 @@ public struct PlayerView: View {
     }
 
     private func restartPlayback() {
+        showTimeoutAlert = false
         if let videoUrl = URL(string: playInfo.playUrl) {
             playerController.setup(
                 url: videoUrl,
                 headers: playInfo.safeHeaders,
-                resumeMs: playerController.currentPositionMs
+                resumeMs: playerController.currentPositionMs,
+                cacheLimitMb: playInfo.safeCacheLimitMb
             )
             startLoadingTimeoutTimer()
         }
@@ -975,7 +1201,10 @@ public struct PlayerView: View {
         hideControlsTimer?.invalidate()
         loadingTimeoutTimer?.invalidate()
         autoNextTimer?.invalidate()
+        subtitleLoadTask?.cancel()
+        subtitleLoadTask = nil
         playerController.destroy()
+        removeRemoteCommands()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
