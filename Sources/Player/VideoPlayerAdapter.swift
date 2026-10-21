@@ -40,8 +40,8 @@ public final class VideoPlayerController: ObservableObject {
         let options = KSOptions()
         // 设置 302 重定向请求头保持与网络参数
         options.appendHeader(headers)
-        options.firstPlayerType = KSMEPlayer.self
-        options.secondPlayerType = KSAVPlayer.self
+        KSOptions.firstPlayerType = KSMEPlayer.self
+        KSOptions.secondPlayerType = KSAVPlayer.self
         self.ksOptions = options
 
         ksCoordinator.onStateChanged = { [weak self] _, state in

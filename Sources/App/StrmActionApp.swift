@@ -8,6 +8,7 @@ struct StrmActionApp: App {
     @State private var activePlayInfo: PlayResponse?
     @State private var webViewRef: WKWebView?
     @State private var errorMessage: String?
+    @State private var bridgeHandler: BridgeHandler?
 
     // 桥接实例
     private let bridge: StrmActionBridge
@@ -82,7 +83,7 @@ struct StrmActionApp: App {
 
     private func setupBridgeDelegate() {
         bridge.allowedHost = URL(string: serverUrl)?.host ?? ""
-        bridge.delegate = BridgeHandler(
+        let handler = BridgeHandler(
             onPlay: { itemId in
                 self.fetchAndPlay(itemId: itemId)
             },
@@ -93,6 +94,8 @@ struct StrmActionApp: App {
                 self.showSetup = true
             }
         )
+        self.bridgeHandler = handler
+        bridge.delegate = handler
     }
 
     private func fetchAndPlay(itemId: Int, mode: String = "builtin") {
