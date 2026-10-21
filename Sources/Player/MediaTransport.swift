@@ -6,9 +6,6 @@ import KSPlayer
 /// 这个模块只做一件事：**让 FFmpeg 直连源站并完成真实的证书校验**。
 /// 它不代理、不转发、不缓存字节，也不提供任何备用通道。
 enum MediaTransport {
-    /// FFmpeg 的超时统一为 15 秒（微秒单位），避免默认无限等待。
-    private static let rwTimeoutMicros = "15000000"
-
     /// 组装播放选项。
     ///
     /// - Parameter request: 已确定证书固定关系的播放请求。
@@ -24,28 +21,16 @@ enum MediaTransport {
         // 2. TLS：真实的链校验，不是关闭校验。
         //    ca_file 会替换 FFmpeg 的默认信任库，因此 bundle 内同时包含
         //    公共根证书与已固定的自签名证书，覆盖「源站 → 302 → CDN」两跳。
+        //
+        //    这里只放 TLS 必需的两项，其余一律不再注入：
+        //    - 不设 verifyhost：它是 AV_OPT_TYPE_STRING（期望主机名），
+        //      留空时 tls.c 会取 URI 的主机名，这正是要的行为。
+        //    - 不设 protocol_whitelist：它会锁死可用协议。一旦系统配置了代理，
+        //      FFmpeg 会走 httpproxy，白名单里没有就直接失败；
+        //      而 ca_file 的读取本身在 whitelist 为 nil 时才不受限制。
+        //    - 不覆盖 reconnect / probesize：KSPlayer 的 KSOptions 已给出合理默认。
         options.formatContextOptions["ca_file"] = caBundlePath
         options.formatContextOptions["tls_verify"] = "1"
-
-        // 刻意**不设置** verifyhost。
-        // 它在 FFmpeg 里是 AV_OPT_TYPE_STRING（要校验的期望主机名），不是布尔开关；
-        // 一旦赋值就会覆盖 URL 里解析出的主机名。留空时 tls.c 会用 URI 的主机名，
-        // 这正是我们想要的：证书必须对该地址有效。
-        //
-        // 另外 ca_file 由 tls_securetransport 的 import_pem 通过 ffio_open_whitelist 读取，
-        // 因此协议白名单必须包含 file，否则读不到证书文件，握手直接失败。
-        options.formatContextOptions["protocol_whitelist"] = "file,http,https,tls,tcp,crypto"
-
-        // 3. 网络健壮性（不是回退）：断流重连与读写超时。
-        options.formatContextOptions["reconnect"] = "1"
-        options.formatContextOptions["reconnect_streamed"] = "1"
-        options.formatContextOptions["reconnect_delay_max"] = "5"
-        options.formatContextOptions["rw_timeout"] = rwTimeoutMicros
-
-        // 4. 探测参数：默认要读满 5 MB 才完成格式探测，
-        //    对慢速大文件会把首帧拖到几分钟。MP4 的 ftyp 在前几百字节即可识别。
-        options.formatContextOptions["probesize"] = "1048576"
-        options.formatContextOptions["analyzeduration"] = "1000000"
 
         // 5. 播放行为
         options.isSeekedAutoPlay = true

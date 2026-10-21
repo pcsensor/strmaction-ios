@@ -281,10 +281,16 @@ public final class VideoPlayerController: ObservableObject {
 
         ksCoordinator.onFinish = { [weak self] layer, error in
             let reason = error?.localizedDescription
+            // KSPlayer 会把 avformat 的错误码塞进 NSError，这里把细节打出来，
+            // 否则永远只能看到 "avformat can't open input" 这种无从下手的信息。
+            var detail = ""
+            if let nsError = error.map({ $0 as NSError }) {
+                detail = " domain=\(nsError.domain) code=\(nsError.code) userInfo=\(nsError.userInfo)"
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 let isCurrent = self.ksCoordinator.playerLayer === layer
-                D.log("finish", "\(reason ?? "正常结束") 是当前图层=\(isCurrent)")
+                D.log("finish", "\(reason ?? "正常结束")\(detail) 是当前图层=\(isCurrent)")
                 guard isCurrent else { return }
 
                 self.isPlaying = false
