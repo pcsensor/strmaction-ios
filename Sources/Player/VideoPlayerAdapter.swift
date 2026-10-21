@@ -60,7 +60,7 @@ public final class VideoPlayerController: ObservableObject {
         playbackProxySession?.invalidate()
         playbackProxySession = nil
         let resolvedURL: URL
-        if InsecurePlaybackProxy.isEnabled(), url.scheme?.lowercased() == "https",
+        if InsecurePlaybackProxy.isEnabled, url.scheme?.lowercased() == "https",
            let proxySession = InsecurePlaybackProxy.shared.makeSession(remoteURL: url, headers: headers)
         {
             playbackProxySession = proxySession
