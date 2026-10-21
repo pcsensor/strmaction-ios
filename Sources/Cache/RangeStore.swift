@@ -80,7 +80,7 @@ final class RangeStore {
         let incoming = offset..<(offset + Int64(data.count))
         if limitBytes > 0 {
             let projected = merged(ranges, adding: incoming)
-                .reduce(Int64(0)) { $0 + $1.count }
+                .reduce(Int64(0)) { $0 + Int64($1.count) }
             if projected > limitBytes { return false }
         }
 
@@ -91,10 +91,10 @@ final class RangeStore {
             return false
         }
 
-        let before = ranges.reduce(Int64(0)) { $0 + $1.count }
+        let before = ranges.reduce(Int64(0)) { $0 + Int64($1.count) }
         ranges = merged(ranges, adding: incoming)
-        let after = ranges.reduce(Int64(0)) { $0 + $1.count }
-        coveredBytes += max(0, after - before)
+        let after = ranges.reduce(Int64(0)) { $0 + Int64($1.count) }
+        coveredBytes += max(Int64(0), after - before)
         return true
     }
 

@@ -14,16 +14,19 @@ final class CacheServer {
     private let store: RangeStore
     private let sourceURL: URL
     private let headers: [String: String]
+    /// 本地端口的随机路径前缀，避免同网段其他人直接拉到缓存内容。
+    private let token: String
     /// 源文件总长度。第一次回源从 `Content-Range` 拿到，后续 seek 直接复用。
     private var totalLength: Int64 = -1
     /// 每个本地连接对应的回源客户端，连接断开时一并取消，避免僵尸下载。
     private var origins: [ObjectIdentifier: OriginClient] = [:]
     private var isStopped = false
 
-    init(sourceURL: URL, headers: [String: String], store: RangeStore) throws {
+    init(sourceURL: URL, headers: [String: String], store: RangeStore, token: String) throws {
         self.sourceURL = sourceURL
         self.headers = headers
         self.store = store
+        self.token = token
 
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
@@ -102,6 +105,14 @@ final class CacheServer {
     }
 
     private func route(_ connection: NWConnection, head: Data) {
+        guard Self.requestMatches(head, token: token) else {
+            let deny = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            connection.send(content: Data(deny.utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+            return
+        }
+
         let range = Self.parseRange(head)
         let start = range.start
         let cachedEnd = store.cachedEnd(from: start)
@@ -230,6 +241,15 @@ final class CacheServer {
 
     // MARK: 解析
 
+    /// 请求行必须带上会话 token，否则直接 403。
+    private static func requestMatches(_ head: Data, token: String) -> Bool {
+        guard let text = String(data: head, encoding: .isoLatin1),
+              let firstLine = text.components(separatedBy: "\r\n").first else {
+            return false
+        }
+        return firstLine.contains("/" + token)
+    }
+
     private static func parseRange(_ head: Data) -> (start: Int64, end: Int64?) {
         guard let text = String(data: head, encoding: .isoLatin1) else { return (0, nil) }
         for line in text.components(separatedBy: "\r\n") {
@@ -307,6 +327,7 @@ final class MediaCacheSession {
         // 单会话：先清掉上一次的残留
         try? FileManager.default.removeItem(at: root)
         let key = Self.hash(sourceURL.absoluteString)
+        let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let directory = root.appendingPathComponent(key, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -314,9 +335,9 @@ final class MediaCacheSession {
         let store = RangeStore(directory: directory, limitBytes: limitBytes)
         try store.prepare()
 
-        let server = try CacheServer(sourceURL: sourceURL, headers: headers, store: store)
+        let server = try CacheServer(sourceURL: sourceURL, headers: headers, store: store, token: token)
         let port = try await server.start()
-        guard port > 0, let localURL = URL(string: "http://127.0.0.1:\(port)/stream") else {
+        guard port > 0, let localURL = URL(string: "http://127.0.0.1:\(port)/\(token)") else {
             server.stop()
             throw CacheError.startFailed
         }

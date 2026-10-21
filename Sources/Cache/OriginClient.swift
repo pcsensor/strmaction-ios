@@ -256,11 +256,14 @@ final class OriginClient {
         url: URL, host: String, port: Int, isTLS: Bool,
         headers: [String: String], start: Int64, end: Int64?
     ) -> Data {
-        // 注意用 percentEncodedPath：URL.path 会把 %E5%BD%B1 解码成中文，
-        // 请求行里必须是原始编码。
-        var path = url.percentEncodedPath.isEmpty ? "/" : url.percentEncodedPath
-        if let query = url.percentEncodedQuery, !query.isEmpty {
-            path += "?" + query
+        // 注意必须用 percentEncoded 的形式：URL.path 会把 %E5%BD%B1 解码成中文，
+        // 而请求行里必须是原始编码，否则源站找不到路径。
+        var path = "/"
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            path = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+            if let query = components.percentEncodedQuery, !query.isEmpty {
+                path += "?" + query
+            }
         }
 
         var lines: [String] = []
