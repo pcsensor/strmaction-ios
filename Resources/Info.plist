@@ -24,12 +24,18 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- 允许访问局域网内的 HTTP 自建服务与自签名证书 -->
+		<!--
+		  允许访问局域网内的 HTTP 自建服务与自签名证书。
+
+		  重要：iOS 10+ 如果同时存在 NSAllowsArbitraryLoadsInWebContent 或
+		  NSAllowsLocalNetworking，NSAllowsArbitraryLoads 会被系统忽略，
+		  ATS 仍然生效。ATS 生效时不允许通过 URLSession 代理放宽服务端信任，
+		  因此"允许自签名证书"开关会失效并报 TLS -1200 错误。
+
+		  这里只保留 NSAllowsArbitraryLoads = true，删除其他两个 key，
+		  确保 URLSessionDelegate 中的自定义证书信任逻辑能够正常工作。
+		-->
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>UIBackgroundModes</key>
