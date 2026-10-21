@@ -1,0 +1,105 @@
+import Foundation
+
+public enum PlayApiError: LocalizedError {
+    case invalidServerUrl
+    case badResponse(statusCode: Int, message: String)
+    case networkError(Error)
+    case decodingError(Error)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidServerUrl:
+            return "无效的服务器地址"
+        case .badResponse(let statusCode, let message):
+            return "服务器错误 (HTTP \(statusCode)): \(message)"
+        case .networkError(let error):
+            return "网络连接失败: \(error.localizedDescription)"
+        case .decodingError(let error):
+            return "数据解析失败: \(error.localizedDescription)"
+        }
+    }
+}
+
+public final class PlayApi {
+    public static let shared = PlayApi()
+    private init() {}
+
+    /// 测试服务器连通性
+    public func checkHealth(serverUrl: String) async throws -> HealthResponse {
+        guard let base = URL(string: serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
+              let url = URL(string: "\(base.absoluteString)/api/health") else {
+            throw PlayApiError.invalidServerUrl
+        }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5.0)
+        request.httpMethod = "GET"
+        request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
+            }
+            guard (200...299).contains(http.statusCode) else {
+                throw PlayApiError.badResponse(statusCode: http.statusCode, message: "健康检查失败")
+            }
+            return try JSONDecoder().decode(HealthResponse.self, from: data)
+        } catch let err as PlayApiError {
+            throw err
+        } catch {
+            throw PlayApiError.networkError(error)
+        }
+    }
+
+    /// 请求播放数据（携带 Web 会话 Cookie）
+    public func fetchPlayInfo(
+        serverUrl: String,
+        itemId: Int,
+        cookieString: String?,
+        mode: String = "builtin"
+    ) async throws -> PlayResponse {
+        guard let base = URL(string: serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
+              let url = URL(string: "\(base.absoluteString)/api/play/\(itemId)") else {
+            throw PlayApiError.invalidServerUrl
+        }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10.0)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
+        request.setValue("StrmActionCompanion/1.0.0 (iOS; Darwin)", forHTTPHeaderField: "User-Agent")
+
+        if let cookie = cookieString, !cookie.isEmpty {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+
+        let body: [String: Any] = ["mode": mode]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
+            }
+
+            guard (200...299).contains(http.statusCode) else {
+                // 尝试解析错误提示
+                if let errorObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let errSub = errorObj["error"] as? [String: Any],
+                   let msg = errSub["message"] as? String {
+                    throw PlayApiError.badResponse(statusCode: http.statusCode, message: msg)
+                }
+                throw PlayApiError.badResponse(statusCode: http.statusCode, message: "状态码异常")
+            }
+
+            return try JSONDecoder().decode(PlayResponse.self, from: data)
+        } catch let err as PlayApiError {
+            throw err
+        } catch let err as DecodingError {
+            throw PlayApiError.decodingError(err)
+        } catch {
+            throw PlayApiError.networkError(error)
+        }
+    }
+}

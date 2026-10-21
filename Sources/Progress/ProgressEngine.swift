@@ -1,0 +1,119 @@
+import Foundation
+
+public final class ProgressEngine {
+    public static let shared = ProgressEngine()
+
+    private struct PendingReport {
+        let serverUrl: String
+        let itemId: Int
+        let playToken: String
+        let positionMs: Int64
+        let durationMs: Int64
+        let finished: Bool
+    }
+
+    private var queue: [PendingReport] = []
+    private let lock = NSLock()
+    private var isDraining = false
+    public var onTokenExpired: (() -> Void)?
+
+    private init() {}
+
+    /// 入队并触发异步上报
+    public func report(
+        serverUrl: String,
+        itemId: Int,
+        playToken: String,
+        positionMs: Int64,
+        durationMs: Int64,
+        finished: Bool
+    ) {
+        let isActuallyFinished = finished || (durationMs > 0 && Double(positionMs) / Double(durationMs) >= 0.90)
+        let report = PendingReport(
+            serverUrl: serverUrl,
+            itemId: itemId,
+            playToken: playToken,
+            positionMs: max(0, positionMs),
+            durationMs: durationMs,
+            finished: isActuallyFinished
+        )
+
+        lock.lock()
+        queue.append(report)
+        // 限制最多排队 3 条，避免网络堆积
+        while queue.count > 3 {
+            queue.removeFirst()
+        }
+        lock.unlock()
+
+        Task {
+            await self.drain()
+        }
+    }
+
+    private func drain() async {
+        lock.lock()
+        guard !isDraining else {
+            lock.unlock()
+            return
+        }
+        isDraining = true
+        lock.unlock()
+
+        while true {
+            lock.lock()
+            guard !queue.isEmpty else {
+                isDraining = false
+                lock.unlock()
+                return
+            }
+            let current = queue.removeFirst()
+            lock.unlock()
+
+            let success = await send(report: current)
+            if !success {
+                // 如果失败且非401，保留下次重试的机会
+                break
+            }
+        }
+
+        lock.lock()
+        isDraining = false
+        lock.unlock()
+    }
+
+    private func send(report: PendingReport) async -> Bool {
+        guard let base = URL(string: report.serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
+              let url = URL(string: "\(base.absoluteString)/api/items/\(report.itemId)/progress") else {
+            return false
+        }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5.0)
+        request.httpMethod = "POST"
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(report.playToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
+
+        let body = ProgressReportBody(
+            positionMs: report.positionMs,
+            durationMs: report.durationMs,
+            finished: report.finished
+        )
+        request.httpBody = try? JSONEncoder().encode(body)
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+
+            if http.statusCode == 401 {
+                DispatchQueue.main.async {
+                    self.onTokenExpired?()
+                }
+                return false
+            }
+            return (200...299).contains(http.statusCode)
+        } catch {
+            return false
+        }
+    }
+}

@@ -1,0 +1,35 @@
+name: StrmAction
+options:
+  bundleIdPrefix: top.strmaction
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.4"
+
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: top.strmaction.companion
+    INFOPLIST_FILE: Resources/Info.plist
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.10"
+    TARGETED_DEVICE_FAMILY: "1,2" # 1: iPhone, 2: iPad
+
+packages:
+  # 开源播放内核（基于 FFmpeg + Metal，原生保持 302 重定向 Header）
+  KSPlayer:
+    url: https://github.com/kingslay/KSPlayer.git
+    from: 2.2.0
+
+targets:
+  StrmAction:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Resources
+    dependencies:
+      - package: KSPlayer
+        product: KSPlayer
+    settings:
+      base:
+        ENABLE_BITCODE: NO
