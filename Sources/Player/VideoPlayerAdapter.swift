@@ -516,10 +516,19 @@ struct KSPlayerSurfaceView: UIViewRepresentable {
             _ = controller.ksCoordinator.makeView(url: url, options: options)
         }
 
-        guard let layer = controller.ksCoordinator.playerLayer,
-              let playerView = layer.player.view
-        else {
-            // 播放器还没准备好渲染 view，先清掉旧图层，避免重试后旧画面残留。
+        // 回调必须在这里立刻安装，不能留到下面 player.view 就绪之后再做。
+        // KSPlayer 的渲染视图是异步创建的，makeView 刚返回时 layer.player.view 仍是 nil；
+        // 若把安装动作放在早退分支之后，就会在首帧被整个跳过。此后只要没有别的
+        // SwiftUI 状态变更触发第二次 updateUIView，回调就永远挂不上——
+        // 表现为播放不报错、duration 恒为 0、isReady 恒为 false，最终只剩超时提示。
+        controller.installKSPlayerCallbacks()
+        if let layer = controller.ksCoordinator.playerLayer {
+            controller.bindPiPState(for: layer)
+        }
+
+        guard let playerView = controller.ksCoordinator.playerLayer?.player.view else {
+            // 渲染视图尚未就绪：回调和 PiP 已经挂好，等 onPlay 发布进度触发重算后
+            // 会再次进入这里，届时把 view 补挂到容器即可。
             container.subviews.forEach { $0.removeFromSuperview() }
             return
         }
@@ -543,9 +552,8 @@ struct KSPlayerSurfaceView: UIViewRepresentable {
                 subview.removeFromSuperview()
             }
         }
-
-        controller.installKSPlayerCallbacks()
-        controller.bindPiPState(for: layer)
+        // 回调与 PiP 绑定已在本方法开头完成，这里不再重复安装，
+        // 避免"看起来像是有两处安装点"而再次把安装逻辑写成条件执行。
     }
 }
 #endif
