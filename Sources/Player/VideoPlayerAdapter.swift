@@ -55,6 +55,19 @@ public final class VideoPlayerController: ObservableObject {
         durationMs = 0
         bufferedPositionMs = 0
 
+        #if canImport(KSPlayer)
+        // 先移除旧图层并重建底层 player layer；仅修改 URL 不会让 KSPlayer 重建播放器。
+        // 先把 ksOptions 清空，避免旧 options 与新代理地址组合后短暂创建出错误的播放器。
+        if let oldLayer = ksCoordinator.playerLayer, oldLayer.isPipActive {
+            oldLayer.isPipActive = false
+        }
+        pipStateCancellable?.cancel()
+        pipStateCancellable = nil
+        boundPiPLayer = nil
+        ksOptions = nil
+        ksCoordinator.resetPlayer()
+        #endif
+
         // 自签名开关开启时，所有 HTTPS 播放地址都改走本机回环代理，
         // 让 FFmpeg 和 AVFoundation 都不直接处理远端证书。
         playbackProxySession?.invalidate()
@@ -71,15 +84,6 @@ public final class VideoPlayerController: ObservableObject {
         playbackURL = resolvedURL
 
         #if canImport(KSPlayer)
-        // 先移除旧图层并重建底层 player layer；仅修改 URL 不会让 KSPlayer 重建播放器。
-        if let oldLayer = ksCoordinator.playerLayer, oldLayer.isPipActive {
-            oldLayer.isPipActive = false
-        }
-        pipStateCancellable?.cancel()
-        pipStateCancellable = nil
-        boundPiPLayer = nil
-        ksCoordinator.resetPlayer()
-
         let options = KSOptions()
         // 设置 302 重定向请求头保持与网络参数
         options.appendHeader(headers)
