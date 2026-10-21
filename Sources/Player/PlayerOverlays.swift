@@ -10,9 +10,12 @@ struct PlayerCenterBadgeView: View {
 
     var body: some View {
         content
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 18)
             .padding(.vertical, 14)
-            .frame(minWidth: 150)
+            // 必须用固定 width，不能用 minWidth：
+            // levelContent 里的 Spacer + GeometryReader 都是贪婪布局，
+            // 在 ZStack 里会被撑到整屏宽，背景就变成一条横贯屏幕的黑条。
+            .frame(width: 200)
             .background {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.black.opacity(0.82))
@@ -30,8 +33,11 @@ struct PlayerCenterBadgeView: View {
         switch badge {
         case .toast(let text):
             Text(text)
-                .font(.system(size: 14.5, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(PlayerTheme.textPrimary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity)
 
         case .scrub(let data):
             scrubContent(data)

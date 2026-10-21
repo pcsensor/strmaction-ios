@@ -275,6 +275,8 @@ struct PlayerDrawerContent: View {
     let onSelectEpisode: (Int) -> Void
     let onExternalPlayer: () -> Void
     let onCopyLink: () -> Void
+    /// 临时诊断入口，排查完成后可整体移除。
+    let onShowDiagnostics: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
     private let longPressSpeeds: [Double] = [1.5, 2.0, 2.5, 3.0]
@@ -363,6 +365,16 @@ struct PlayerDrawerContent: View {
         ) {
             onCopyLink()
             ui.closeDrawer()
+        }
+
+        // 临时诊断入口：进入后再点「复制全部」，把日志贴回来即可。
+        PlayerDrawerActionRow(
+            icon: "ladybug",
+            title: "诊断日志",
+            subtitle: "播放异常时用于定位",
+            tint: PlayerTheme.textMuted
+        ) {
+            onShowDiagnostics()
         }
     }
 

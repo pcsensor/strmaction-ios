@@ -31,6 +31,9 @@ public struct PlayerView: View {
     // 手势
     @State private var dragBegan = false
 
+    // 临时诊断面板
+    @State private var showDiagnostics = false
+
     // 定时器与远程控制注册
     @State private var heartbeatTimer: Timer?
     @State private var loadingTimeoutTimer: Timer?
@@ -92,10 +95,30 @@ public struct PlayerView: View {
                 //    会抢走所有按钮的点击（这是「控件点了没反应」的典型成因）。
                 gestureLayer(size: geometry.size)
 
-                // 3. 控件层（渐变遮罩 + 顶栏 / 中心键 / 底栏 / 锁定入口）
+                // 3. 外挂字幕渲染层。排在控件层之前，保证控件压在字幕之上。
+                if let subtitle = playerController.subtitleText {
+                    VStack {
+                        Spacer()
+                        Text(subtitle)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(4)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.black.opacity(0.55))
+                            .cornerRadius(6)
+                            .shadow(color: .black.opacity(0.9), radius: 2, x: 0, y: 1)
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, 96)
+                    }
+                    .allowsHitTesting(false)
+                }
+
+                // 4. 控件层（渐变遮罩 + 顶栏 / 中心键 / 底栏 / 锁定入口）
                 chrome
 
-                // 4. 亮度遮罩：iOS 没有 per-window 亮度，用一层压暗替代，
+                // 5. 亮度遮罩：iOS 没有 per-window 亮度，用一层压暗替代，
                 //    盖在控件之上、浮层之下，既不污染系统设置也能整体压暗。
                 if ui.dimAmount > 0.002 {
                     Color.black
@@ -105,7 +128,7 @@ public struct PlayerView: View {
                         .animation(.easeOut(duration: 0.12), value: ui.dimAmount)
                 }
 
-                // 5. 瞬时反馈浮层（全部居中，不再跟随手指）
+                // 6. 瞬时反馈浮层（全部居中，不再跟随手指）
                 if let speed = ui.speedBadge {
                     VStack(spacing: 0) {
                         PlayerSpeedBadgeView(speed: speed)
@@ -127,7 +150,7 @@ public struct PlayerView: View {
                         .allowsHitTesting(false)
                 }
 
-                // 6. 锁定状态的解锁按钮（独立于控件层，始终压在亮度遮罩之上）
+                // 7. 锁定状态的解锁按钮（独立于控件层，始终压在亮度遮罩之上）
                 if ui.isLocked && ui.isLockButtonVisible {
                     PlayerLockButton(ui: ui)
                         // .trailing 即「水平靠右、垂直居中」；SwiftUI 没有 .centerTrailing。
@@ -136,7 +159,7 @@ public struct PlayerView: View {
                         .transition(.opacity)
                 }
 
-                // 7. 自动连播
+                // 8. 自动连播
                 if showAutoNextOverlay {
                     PlayerAutoNextOverlay(
                         nextTitle: playInfo.nextTitle ?? "下一集",
@@ -146,7 +169,7 @@ public struct PlayerView: View {
                     )
                 }
 
-                // 8. 播放错误
+                // 9. 播放错误
                 if let message = playerController.errorMessage {
                     PlayerErrorOverlay(
                         message: message,
@@ -155,7 +178,7 @@ public struct PlayerView: View {
                     )
                 }
 
-                // 9. 功能面板
+                // 10. 功能面板
                 if let drawer = ui.activeDrawer {
                     drawerLayer(drawer, size: geometry.size)
                         .transition(.move(edge: .trailing))
@@ -191,9 +214,13 @@ public struct PlayerView: View {
                 ui.showToast("直链已复制到剪贴板")
             }
             Button("用外部播放器打开") { openExternalPlayer() }
+            Button("查看诊断日志") { showDiagnostics = true }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("连接网盘超时，可能因防盗链拦截或网络阻塞。您可以尝试重试，或复制直链通过第三方播放器加载。")
+            Text("连接网盘超时，可能因防盗链拦截或网络阻塞。您可以重试、复制直链，或查看诊断日志。")
+        }
+        .sheet(isPresented: $showDiagnostics) {
+            PlayerDiagnosticsView()
         }
     }
 
@@ -326,6 +353,10 @@ public struct PlayerView: View {
                 onCopyLink: {
                     UIPasteboard.general.string = playInfo.playUrl
                     ui.showToast("播放直链已复制")
+                },
+                onShowDiagnostics: {
+                    ui.closeDrawer(animated: false)
+                    showDiagnostics = true
                 }
             )
         }
@@ -395,6 +426,7 @@ public struct PlayerView: View {
     // MARK: - 生命周期与控制
 
     private func setupInitialState() {
+        D.log("view", "onAppear → setupInitialState itemId=\(playInfo.itemId)")
         ui.player = playerController
         configureAudioSession()
         setupNowPlayingInfo()
@@ -507,6 +539,7 @@ public struct PlayerView: View {
         loadingTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: false) { _ in
             Task { @MainActor in
                 guard !self.playerController.isReady, self.playerController.errorMessage == nil else { return }
+                D.log("view", "15 秒看门狗触发：仍未 ready，且无错误信息")
                 self.showTimeoutAlert = true
             }
         }
@@ -626,6 +659,7 @@ public struct PlayerView: View {
     }
 
     private func cleanup() {
+        D.log("view", "cleanup → 销毁播放会话")
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         loadingTimeoutTimer?.invalidate()

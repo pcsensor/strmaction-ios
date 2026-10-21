@@ -28,6 +28,8 @@ public final class VideoPlayerController: ObservableObject {
     fileprivate var avPlayer: AVPlayer?
     private var timeObserverToken: Any?
     private var cancellables = Set<AnyCancellable>()
+    /// 诊断日志节流用：上一次记录过的播放秒数。
+    private var lastDiagnosticPlaySecond: Int64 = -1
 
     #if canImport(KSPlayer)
     public let ksCoordinator = KSVideoPlayer.Coordinator()
@@ -45,6 +47,15 @@ public final class VideoPlayerController: ObservableObject {
     public init() {}
 
     public func setup(url: URL, headers: [String: String], resumeMs: Int64, cacheLimitMb: Int = 128) {
+        D.log("setup", "开始 url=\(url.absoluteString.prefix(120)) resumeMs=\(resumeMs) cacheMb=\(cacheLimitMb)")
+        D.log("setup", "请求头 keys=\(headers.keys.sorted().joined(separator: ","))")
+        if let ua = headers.first(where: { $0.key.lowercased() == "user-agent" })?.value {
+            D.log("setup", "服务端下发 UA=\(ua.prefix(100))")
+        } else {
+            D.log("setup", "服务端未下发 User-Agent")
+        }
+        D.log("setup", "代理开关 allow_insecure_http=\(InsecurePlaybackProxy.isEnabled)")
+
         isPlaying = false
         isReady = false
         isFinished = false
@@ -82,6 +93,9 @@ public final class VideoPlayerController: ObservableObject {
             resolvedURL = url
         }
         playbackURL = resolvedURL
+        D.log("setup", resolvedURL.absoluteString.hasPrefix("http://127.0.0.1")
+              ? "走回环代理 → \(resolvedURL.absoluteString.prefix(140))"
+              : "直连远端 → \(resolvedURL.absoluteString.prefix(140))")
 
         #if canImport(KSPlayer)
         let options = KSOptions()
@@ -336,8 +350,17 @@ public final class VideoPlayerController: ObservableObject {
     /// 因此每次挂载图层后都需要再次安装 App 的回调。
     public func installKSPlayerCallbacks() {
         ksCoordinator.onStateChanged = { [weak self] layer, state in
+            let layerURL = layer.url.absoluteString
             DispatchQueue.main.async {
-                guard let self = self, self.ksCoordinator.playerLayer === layer else { return }
+                guard let self = self else {
+                    D.log("state", "\(state) 但 self 已释放（layerURL=\(layerURL.prefix(50))）")
+                    return
+                }
+                let isCurrent = self.ksCoordinator.playerLayer === layer
+                // 这条日志是关键：若 isCurrent=false，说明图层已被重建，
+                // 旧图层的状态会被静默丢弃，表现为永远不 ready。
+                D.log("state", "\(state) 是当前图层=\(isCurrent) layerURL=\(layerURL.prefix(60))")
+                guard isCurrent else { return }
                 if state == .readyToPlay {
                     self.isReady = true
                     self.applyVolume()
@@ -364,7 +387,22 @@ public final class VideoPlayerController: ObservableObject {
 
         ksCoordinator.onPlay = { [weak self] current, total in
             DispatchQueue.main.async {
-                guard let self = self, self.ksCoordinator.playerLayer != nil else { return }
+                guard let self = self else { return }
+                guard let layer = self.ksCoordinator.playerLayer else {
+                    D.log("play", "回调触发但 playerLayer 为 nil（pos=\(current)）")
+                    return
+                }
+                // 每 2 秒记一条，避免刷爆环形缓冲；首帧一定记。
+                let second = Int64(current)
+                if self.lastDiagnosticPlaySecond < 0 || (second % 2 == 0 && second != self.lastDiagnosticPlaySecond) {
+                    self.lastDiagnosticPlaySecond = second
+                    D.log("play", String(
+                        format: "pos=%.2f total=%.2f isPlaying=%@ layerURL=%@",
+                        current, total,
+                        self.ksCoordinator.state.isPlaying ? "true" : "false",
+                        String(layer.url.absoluteString.prefix(50))
+                    ))
+                }
                 self.currentPositionMs = Int64(current * 1000)
                 if total > 0 {
                     self.durationMs = Int64(total * 1000)
@@ -387,8 +425,12 @@ public final class VideoPlayerController: ObservableObject {
         }
 
         ksCoordinator.onFinish = { [weak self] layer, error in
+            let reason = error.map { $0.localizedDescription } ?? "正常结束"
             DispatchQueue.main.async {
-                guard let self = self, self.ksCoordinator.playerLayer === layer else { return }
+                guard let self = self else { return }
+                let isCurrent = self.ksCoordinator.playerLayer === layer
+                D.log("finish", "\(reason) 是当前图层=\(isCurrent)")
+                guard isCurrent else { return }
                 self.isPlaying = false
                 if let err = error {
                     self.isReady = false
@@ -424,6 +466,9 @@ public final class VideoPlayerController: ObservableObject {
     #endif
 
     public func destroy() {
+        // 若这一行在 setup 之后不久就出现，说明播放器被提前销毁了，
+        // 这正是「UI 还在但永远不播」的典型信号。
+        D.log("destroy", "销毁播放器")
         isPlaying = false
         isReady = false
         isPiPActive = false
@@ -512,8 +557,13 @@ struct KSPlayerSurfaceView: UIViewRepresentable {
     func updateUIView(_ container: UIView, context: Context) {
         // 仅在 URL 变化或重试后 playerLayer 为空时创建新图层。
         // 频繁调用 makeView 会反复重置 subtitleModel.url，从而清空字幕选择。
-        if controller.ksCoordinator.playerLayer?.url != url {
+        let layerURL = controller.ksCoordinator.playerLayer?.url.absoluteString
+        let needsCreate = layerURL != url.absoluteString
+        D.log("surface", "updateUIView needsCreate=\(needsCreate) layerURL=\(layerURL?.prefix(60) ?? "nil") target=\(url.absoluteString.prefix(60))")
+
+        if needsCreate {
             _ = controller.ksCoordinator.makeView(url: url, options: options)
+            D.log("surface", "makeView 完成 playerLayer=\(controller.ksCoordinator.playerLayer == nil ? "nil" : "ok") playerView=\(controller.ksCoordinator.playerLayer?.player.view == nil ? "nil" : "ok")")
         }
 
         // 回调必须在这里立刻安装，不能留到下面 player.view 就绪之后再做。

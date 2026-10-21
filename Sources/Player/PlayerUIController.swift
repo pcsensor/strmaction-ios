@@ -125,13 +125,16 @@ final class PlayerUIController: ObservableObject {
     private var badgeTimer: Timer?
 
     init() {
-        // 用当前系统亮度作为起点，用户一上手就知道「原来是多少」。
-        // 注意：这里必须用局部变量，不能读 brightness —— 在全部存储属性初始化完成前
-        // 访问 self 属于非法访问，Swift 会直接编译报错。
-        let systemBrightness = Double(UIScreen.main.brightness)
-        let initialBrightness = max(0.02, min(1.0, systemBrightness.isFinite ? systemBrightness : 0.6))
-        brightness = initialBrightness
-        dimAmount = (1 - initialBrightness) * PlayerTheme.maxDimAmount
+        // 亮度采用「相对档位」：1.0 = 不额外压暗（画面亮度等同系统设定），
+        // 向下拖动才叠加压暗遮罩。
+        //
+        // 旧实现把系统亮度映射成遮罩不透明度（(1 - 系统亮度) × 0.75），
+        // 等于在「系统已经调暗过的画面」上再压一层，形成双重变暗：
+        // 系统亮度 0.5 时额外压暗 37.5%，0.3 时压暗 52.5%，暗场景近乎全黑。
+        //
+        // 另外这里不读取任何属性，避免在存储属性初始化完成前访问 self。
+        brightness = 1.0
+        dimAmount = 0
         volume = 1.0
     }
 

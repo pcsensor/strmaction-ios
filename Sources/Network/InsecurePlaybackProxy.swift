@@ -31,6 +31,7 @@ final class InsecurePlaybackProxy {
             return nil
         }
         guard let port = ensureStarted() else {
+            D.log("proxy", "makeSession 失败：listener 未就绪")
             return nil
         }
 
@@ -43,6 +44,7 @@ final class InsecurePlaybackProxy {
         queue.sync {
             sessions[id] = headers
         }
+        D.log("proxy", "makeSession 成功 id=\(id.prefix(8)) port=\(port)")
         return InsecurePlaybackSession(id: id, localURL: localURL, proxy: self)
     }
 
@@ -89,10 +91,12 @@ final class InsecurePlaybackProxy {
                     switch state {
                     case .ready:
                         self.listeningPort = listener.port?.rawValue
+                        D.log("proxy", "listener ready port=\(listener.port?.rawValue ?? 0)")
                         self.isStarting = false
                         self.signalStartWaiters()
                     case .failed(let error):
                         print("[PlaybackProxy] listener failed: \(error)")
+                        D.log("proxy", "listener failed: \(error)")
                         self.listeningPort = nil
                         self.isStarting = false
                         self.signalStartWaiters()
@@ -135,6 +139,7 @@ final class InsecurePlaybackProxy {
                 return
             }
             if error != nil {
+                D.log("proxy", "连接接收出错: \(error!)")
                 connection.cancel()
                 return
             }
@@ -180,6 +185,7 @@ final class InsecurePlaybackProxy {
         }
         let method = String(requestParts[0]).uppercased()
         let target = String(requestParts[1])
+        D.log("proxy", "收到请求 \(method) \(target.prefix(90))")
 
         guard method == "GET" || method == "HEAD" else {
             sendSimpleError(connection: connection, status: 405, reason: "Method Not Allowed")
@@ -398,6 +404,7 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
             delegate: self,
             delegateQueue: delegateQueue
         )
+        D.log("proxy", "回源请求 \(method) \(remoteURL.absoluteString.prefix(100)) 头数=\(request.allHTTPHeaderFields?.count ?? 0)")
         let dataTask = session.dataTask(with: request)
         stateQueue.sync {
             self.urlSession = session
@@ -594,6 +601,7 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
         _ challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        D.log("proxy", "证书挑战 method=\(challenge.protectionSpace.authenticationMethod) host=\(challenge.protectionSpace.host)")
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let serverTrust = challenge.protectionSpace.serverTrust
         else {
@@ -624,6 +632,11 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        if let http = response as? HTTPURLResponse {
+            D.log("proxy", "回源响应 status=\(http.statusCode) len=\(http.expectedContentLength) type=\(http.mimeType ?? "-")")
+        } else {
+            D.log("proxy", "回源响应非 HTTP: \(response)")
+        }
         guard let http = response as? HTTPURLResponse else {
             completionHandler(.cancel)
             stateQueue.sync {
@@ -689,6 +702,7 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
+        D.log("proxy", "回源结束 error=\(error.map { $0.localizedDescription } ?? "none")")
         stateQueue.sync {
             self.handleComplete(error)
         }
