@@ -58,19 +58,6 @@ public final class ProgressEngine: NSObject, URLSessionDelegate, URLSessionTaskD
             return
         }
 
-        // 1. 设置允许基本 X.509 策略，支持纯 IP
-        let basicPolicy = SecPolicyCreateBasicX509()
-        SecTrustSetPolicies(serverTrust, basicPolicy)
-
-        // 2. 将服务端证书置入锚点
-        if let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate], !certChain.isEmpty {
-            SecTrustSetAnchorCertificates(serverTrust, certChain as CFArray)
-            SecTrustSetAnchorCertificatesOnly(serverTrust, false)
-        }
-
-        var error: CFError?
-        _ = SecTrustEvaluateWithError(serverTrust, &error)
-
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 

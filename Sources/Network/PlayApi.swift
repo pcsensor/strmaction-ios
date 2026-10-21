@@ -14,7 +14,14 @@ public enum PlayApiError: LocalizedError {
         case .badResponse(let statusCode, let message):
             return "服务器错误 (HTTP \(statusCode)): \(message)"
         case .networkError(let error):
-            return "网络连接失败: \(error.localizedDescription)"
+            let ns = error as NSError
+            var details = error.localizedDescription
+            if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+                details += " [\(ns.domain) \(ns.code), \(underlying.domain) \(underlying.code)]"
+            } else {
+                details += " [\(ns.domain) \(ns.code)]"
+            }
+            return "网络连接失败: \(details)"
         case .decodingError(let error):
             return "数据解析失败: \(error.localizedDescription)"
         }
@@ -65,21 +72,7 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
             return
         }
 
-        // 1. 将策略重置为基础 X.509 结构策略，免去严格的标准 DNS 主机名匹配要求（支持纯 IP 直连）
-        let basicPolicy = SecPolicyCreateBasicX509()
-        SecTrustSetPolicies(serverTrust, basicPolicy)
-
-        // 2. 将服务端发来的证书链本身置入锚点信任列表中，支持 Caddy 等自签名 Authority
-        if let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate], !certChain.isEmpty {
-            SecTrustSetAnchorCertificates(serverTrust, certChain as CFArray)
-            SecTrustSetAnchorCertificatesOnly(serverTrust, false)
-        }
-
-        // 3. 评估信任结果
-        var error: CFError?
-        _ = SecTrustEvaluateWithError(serverTrust, &error)
-
-        // 4. 回传凭据完成 TLS 握手
+        // 直接以此凭证放行 TLS 连接，避免调用 SecTrustEvaluateWithError 导致状态被置为失败
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 
