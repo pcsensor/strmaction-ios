@@ -74,12 +74,9 @@ enum PlayerTheme {
     static let doubleTapRightZone: Double = 0.65
     static let skipIntervalSeconds: Int64 = 10
     /// 横向滑动整屏可跨越的最大时长（与 Android 一致取 3 分钟）。
-    static let scrubRangeMs: Int64 = 180_000
-    /// 纵向滑动灵敏度：上滑一个屏高对应 100% 变化。
-    static let verticalSensitivity: Double = 0.85
+    static let scrubRangeMs: Int64 = 180_000    /// 纵向滑动灵敏度：上滑一个屏高对应 100% 变化。
+    static let verticalSensitivity: Double = 1.0
     static let dragSlop: CGFloat = 14
-    /// 亮度遮罩最多能压暗到 75%，全黑会让用户失去方向感。
-    static let maxDimAmount: Double = 0.75
 }
 
 // MARK: - 形状

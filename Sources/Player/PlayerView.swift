@@ -99,6 +99,12 @@ public struct PlayerView: View {
             ZStack {
                 // 1. 视频画面
                 Color.black.ignoresSafeArea()
+
+                // 系统音量控制的隐藏宿主：MPVolumeView 必须挂在视图层级里，
+                // 否则取不到内部 slider，写值不生效。
+                SystemVolumeHost()
+                    .frame(width: 2, height: 2)
+                    .allowsHitTesting(false)
                 if let videoUrl = URL(string: playInfo.playUrl) {
                     VideoSurfaceView(
                         controller: playerController,
@@ -134,15 +140,8 @@ public struct PlayerView: View {
                 // 4. 控件层（渐变遮罩 + 顶栏 / 中心键 / 底栏 / 锁定入口）
                 chrome
 
-                // 5. 亮度遮罩：iOS 没有 per-window 亮度，用一层压暗替代，
-                //    盖在控件之上、浮层之下，既不污染系统设置也能整体压暗。
-                if ui.dimAmount > 0.002 {
-                    Color.black
-                        .opacity(ui.dimAmount)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                        .animation(.easeOut(duration: 0.12), value: ui.dimAmount)
-                }
+                // 5. 亮度直接写系统 `UIScreen.main.brightness`，
+                //    不再叠加压暗遮罩——遮罩只能变暗，永远突破不了系统亮度这个上限。
 
                 // 6. 瞬时反馈浮层（全部居中，不再跟随手指）
                 if let speed = ui.speedBadge {
@@ -683,8 +682,9 @@ public struct PlayerView: View {
         playerController.destroy()
         removeRemoteCommands()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        // 退出时如果停在全屏/锁定态，恢复成竖屏与正常亮度，避免下次进入是错的。
+        // 退出时如果停在全屏/锁定态，恢复成竖屏；系统亮度与音量也还原成进入前的值。
         ui.resetForNewEpisode()
+        ui.restoreSystemSettings()
         SystemOrientation.request(.all)
     }
 }

@@ -28,7 +28,6 @@ public final class VideoPlayerController: ObservableObject {
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var isPiPActive: Bool = false
     @Published public private(set) var subtitleText: String?
-    @Published public private(set) var volume: Double = 1.0
 
     /// 交给 SwiftUI 的渲染图层参数。
     @Published public private(set) var ksOptions: KSOptions?
@@ -166,12 +165,6 @@ public final class VideoPlayerController: ObservableObject {
     public func toggleAspect() {
         isAspectFill.toggle()
         ksCoordinator.isScaleAspectFill = isAspectFill
-    }
-
-    public func setVolume(_ value: Double) {
-        let clamped = max(0, min(1, value))
-        volume = clamped
-        ksCoordinator.playerLayer?.player.playbackVolume = Float(clamped)
     }
 
     // MARK: - 画中画
@@ -339,7 +332,8 @@ public final class VideoPlayerController: ObservableObject {
         isPlaying = true
         ksCoordinator.playbackRate = Float(playbackSpeed)
         ksCoordinator.isScaleAspectFill = isAspectFill
-        ksCoordinator.playerLayer?.player.playbackVolume = Float(volume)
+        // 音量由系统音量控制，播放器固定满增益，避免二次衰减。
+        ksCoordinator.playerLayer?.player.playbackVolume = 1.0
         reapplySelectedSubtitle()
 
         phase = .ready

@@ -96,12 +96,17 @@ final class PlayerUIController: ObservableObject {
     @Published private(set) var scrubPreviewMs: Int64?
 
     // 亮度 / 音量
+    //
+    // 两者都直接作用于**系统**：`UIScreen.main.brightness` 与 `MPVolumeView`。
+    // 之前亮度用压暗遮罩、音量用播放器增益，上限都被锁死在「系统当前值」——
+    // 拖到顶只是把叠加的衰减去掉，所以永远不够亮、不够响。
     @Published private(set) var brightness: Double
     @Published private(set) var volume: Double
 
-    /// 亮度遮罩层的不透明度（0~maxDimAmount）。iOS 没有 per-window 亮度 API，
-    /// 用一层压暗遮罩替代，既不会污染系统设置、退出页面自动还原。
-    @Published private(set) var dimAmount: Double = 0
+    /// 进入播放器时的系统亮度，退出时还原。
+    private let baselineBrightness: CGFloat
+    /// 首次读到的系统音量，退出时还原。
+    private var baselineVolume: Float?
 
     // MARK: 依赖
 
@@ -116,24 +121,18 @@ final class PlayerUIController: ObservableObject {
     private var panStartVolume: Double = 0
     /// 进度条正在被拖动（横向手势不算，两者取或）。
     private var isBarScrubbing = false
-    private var hasInitializedVolume = false
 
     private var hideTimer: Timer?
     private var lockButtonTimer: Timer?
     private var badgeTimer: Timer?
 
     init() {
-        // 亮度采用「相对档位」：1.0 = 不额外压暗（画面亮度等同系统设定），
-        // 向下拖动才叠加压暗遮罩。
-        //
-        // 旧实现把系统亮度映射成遮罩不透明度（(1 - 系统亮度) × 0.75），
-        // 等于在「系统已经调暗过的画面」上再压一层，形成双重变暗：
-        // 系统亮度 0.5 时额外压暗 37.5%，0.3 时压暗 52.5%，暗场景近乎全黑。
-        //
-        // 另外这里不读取任何属性，避免在存储属性初始化完成前访问 self。
-        brightness = 1.0
-        dimAmount = 0
-        volume = 1.0
+        // 记住进入时的系统亮度，退出播放器时还原——改系统亮度是全局副作用，必须收尾。
+        // 这里不读取任何属性，避免在存储属性初始化完成前访问 self。
+        let screenBrightness = UIScreen.main.brightness
+        baselineBrightness = screenBrightness
+        brightness = Double(screenBrightness)
+        volume = Double(AVAudioSession.sharedInstance().outputVolume)
     }
 
     // 所有定时器都用 [weak self] 捕获，控制器释放后回调自动空转，
@@ -407,22 +406,37 @@ final class PlayerUIController: ObservableObject {
     private func setBrightness(_ value: Double) {
         let clamped = max(0.02, min(1.0, value))
         brightness = clamped
-        dimAmount = (1 - clamped) * PlayerTheme.maxDimAmount
+        // 直接改系统亮度，才能突破「只能变暗、不能变亮」的上限。
+        UIScreen.main.brightness = CGFloat(clamped)
         presentBadge(.brightness(clamped))
     }
 
     private func setVolume(_ value: Double) {
         let clamped = max(0, min(1, value))
         volume = clamped
-        player?.setVolume(clamped)
+        // 走系统音量：播放器增益固定 1.0，不再二次衰减。
+        SystemVolumeController.shared.set(Float(clamped))
         presentBadge(.volume(clamped))
     }
 
+    /// 退出播放器时把系统亮度、音量还原成进入前的值。
+    ///
+    /// 这两个都是全局副作用，不还原就会把用户在 App 里调的值留在系统设置里。
+    func restoreSystemSettings() {
+        UIScreen.main.brightness = baselineBrightness
+        brightness = Double(baselineBrightness)
+        if let baselineVolume {
+            SystemVolumeController.shared.set(baselineVolume)
+            volume = Double(baselineVolume)
+        }
+    }
+
     private func syncSystemVolumeIfNeeded() {
-        guard !hasInitializedVolume else { return }
+        guard baselineVolume == nil else { return }
         let sessionVolume = AVAudioSession.sharedInstance().outputVolume
         guard sessionVolume > 0 else { return }
-        hasInitializedVolume = true
+        // 第一次拖动前记下系统音量，退出时还原用。
+        baselineVolume = sessionVolume
         volume = Double(sessionVolume)
     }
 
