@@ -539,7 +539,7 @@ public struct PlayerView: View {
         loadingTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: false) { _ in
             Task { @MainActor in
                 guard !self.playerController.isReady, self.playerController.errorMessage == nil else { return }
-                D.log("view", "15 秒看门狗触发：仍未 ready，且无错误信息")
+                D.log("view", "15 秒看门狗触发：仍未 ready。播放中=\(self.playerController.isPlaying) 位置=\(self.playerController.currentPositionMs) 时长=\(self.playerController.durationMs) 已缓冲=\(self.playerController.bufferedPositionMs)")
                 self.showTimeoutAlert = true
             }
         }

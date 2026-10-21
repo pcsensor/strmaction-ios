@@ -131,6 +131,9 @@ public final class VideoPlayerController: ObservableObject {
         }
         KSOptions.firstPlayerType = KSMEPlayer.self
         KSOptions.secondPlayerType = KSAVPlayer.self
+        // 诊断：缓存模式会让 KSPlayer 先攒够一段缓冲才进 readyToPlay，
+        // 对超大文件 + 慢上游来说，这会表现为长期停在 preparing。
+        D.log("setup", "options cache=\(options.cache) maxBuffer=\(options.maxBufferDuration)s 预读=\(options.preferredForwardBufferDuration)s tlsVerify=\(options.formatContextOptions["tls_verify"] ?? "-")")
         self.setupResumeMs = max(0, resumeMs)
         installKSPlayerCallbacks()
         // 最后再发布 options，确保 SwiftUI 创建图层时回调与续播位置都已就绪。
