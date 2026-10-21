@@ -69,7 +69,7 @@ public final class VideoPlayerController: ObservableObject {
 
     /// 建立证书固定关系、组装选项、创建图层。整个过程是确定的单行道。
     public func load(_ request: PlaybackRequest) async {
-        D.log("engine", "load \(request.url.absoluteString.prefix(110)) resumeMs=\(request.resumeMs) buffer=\(Int(request.bufferTargetSeconds))s")
+        D.log("engine", "load \(request.url.absoluteString.prefix(110)) resumeMs=\(request.resumeMs) buffer=\(request.bufferLimitMb)MB")
 
         resetState()
         phase = .resolving
