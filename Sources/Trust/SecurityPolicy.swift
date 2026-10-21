@@ -62,7 +62,8 @@ enum SecurityPolicy {
             pem: CertificateTools.pem(from: leafDER),
             subject: CertificateTools.subject(of: leaf),
             notAfter: CertificateTools.notAfter(of: leaf),
-            pinnedAt: Date()
+            pinnedAt: Date(),
+            chainUsable: nil
         )
         store.store(pin)
         completionHandler(.useCredential, URLCredential(trust: trust))
@@ -101,6 +102,13 @@ enum SecurityPolicy {
                     actual: String(capture.fingerprint.prefix(23)) + "…"
                 )
             }
+            // 刷新「可链校验」结论，保证提示信息始终反映当前证书状态。
+            if existing.chainUsable != capture.chainUsable {
+                var refreshed = existing
+                refreshed.chainUsable = capture.chainUsable
+                store.store(refreshed)
+                return refreshed
+            }
             return existing
         }
 
@@ -110,7 +118,8 @@ enum SecurityPolicy {
             pem: capture.pem,
             subject: capture.subject,
             notAfter: capture.notAfter,
-            pinnedAt: Date()
+            pinnedAt: Date(),
+            chainUsable: capture.chainUsable
         )
         store.store(pin)
         return pin

@@ -15,6 +15,9 @@ struct TLSCapture {
     let notAfter: Date?
     /// 该链能否被系统公共根验证通过。
     let isPubliclyTrusted: Bool
+    /// 以叶子证书为锚点、按 SSL 策略（含主机名）能否校验通过。
+    /// 等价于预判 FFmpeg 侧 `tls_verify=1 + ca_file` 的结果。
+    let chainUsable: Bool
 
     var fingerprint: String {
         CertificateTools.sha256Fingerprint(of: leafDER)
@@ -125,18 +128,17 @@ enum TLSProbe {
             guard let leaf = chain.first else {
                 throw TLSProbeError.noCertificate(hostKey)
             }
+            let chainUsable = CertificateTools.validatesAsAnchor(chain: chain, host: host)
             let capture = TLSCapture(
                 hostKey: hostKey,
                 leafDER: CertificateTools.der(from: leaf),
                 chainDER: chain.map { CertificateTools.der(from: $0) },
                 subject: CertificateTools.subject(of: leaf),
                 notAfter: CertificateTools.notAfter(of: leaf),
-                isPubliclyTrusted: CertificateTools.isPubliclyTrusted(trust)
+                isPubliclyTrusted: CertificateTools.isPubliclyTrusted(trust),
+                chainUsable: chainUsable
             )
 
-            // 预判 FFmpeg 侧 ca_file + tls_verify=1 是否能够通过：
-            // 以叶子证书为锚点、按 SSL 策略（含主机名）评估一次。
-            let chainUsable = CertificateTools.validatesAsAnchor(chain: chain, host: host)
             D.log("probe", "探测成功 \(hostKey) 公共CA=\(capture.isPubliclyTrusted) 可链校验=\(chainUsable) 主体=\(capture.subject)")
             if !capture.isPubliclyTrusted && !chainUsable {
                 D.log("probe", "警告：证书无法作为锚点通过主机名校验，FFmpeg 会拒绝连接。"

@@ -19,6 +19,11 @@ struct PinnedCertificate: Codable, Identifiable, Equatable {
     let subject: String
     let notAfter: Date?
     let pinnedAt: Date
+    /// 该证书能否作为锚点通过「链 + 主机名」校验。
+    ///
+    /// 为 false 说明证书没有绑定当前地址（缺 subjectAltName），
+    /// 此时 FFmpeg 的 `tls_verify=1` 必然失败。用可选类型保持对旧记录的兼容。
+    var chainUsable: Bool?
 
     var id: String { hostKey }
 
