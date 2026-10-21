@@ -40,6 +40,8 @@ public final class VideoPlayerController: ObservableObject {
         let options = KSOptions()
         // 设置 302 重定向请求头保持与网络参数
         options.appendHeader(headers)
+        // 允许自签名或无校验的 TLS/HTTPS 直链
+        options.formatContextOptions["tls_verify"] = "0"
         KSOptions.firstPlayerType = KSMEPlayer.self
         KSOptions.secondPlayerType = KSAVPlayer.self
         self.ksOptions = options

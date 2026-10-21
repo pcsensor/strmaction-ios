@@ -166,7 +166,7 @@ public struct SetupView: View {
 
         Task {
             do {
-                let health = try await PlayApi.shared.checkHealth(serverUrl: clean)
+                let health = try await PlayApi.shared.checkHealth(serverUrl: clean, allowInsecure: allowInsecureHttp)
                 DispatchQueue.main.async {
                     self.isTesting = false
                     if health.ok {
@@ -190,6 +190,7 @@ public struct SetupView: View {
     private func saveAndEnter() {
         let clean = inputUrl.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         serverUrl = clean
+        UserDefaults.standard.set(allowInsecureHttp, forKey: "allow_insecure_http")
         isPresented = false
     }
 }

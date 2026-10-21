@@ -1,6 +1,6 @@
 import Foundation
 
-public final class ProgressEngine {
+public final class ProgressEngine: NSObject, URLSessionDelegate {
     public static let shared = ProgressEngine()
 
     private struct PendingReport {
@@ -17,7 +17,28 @@ public final class ProgressEngine {
     private var isDraining = false
     public var onTokenExpired: (() -> Void)?
 
-    private init() {}
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.default
+        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }()
+
+    private override init() {
+        super.init()
+    }
+
+    public func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let allowInsecure = UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true
+        if allowInsecure && challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let serverTrust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
 
     /// 入队并触发异步上报
     public func report(
@@ -102,7 +123,7 @@ public final class ProgressEngine {
         request.httpBody = try? JSONEncoder().encode(body)
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return false }
 
             if http.statusCode == 401 {

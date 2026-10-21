@@ -33,6 +33,7 @@ targets:
         product: KSPlayer
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_BITCODE: NO
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO

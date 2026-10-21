@@ -20,23 +20,52 @@ public enum PlayApiError: LocalizedError {
     }
 }
 
-public final class PlayApi {
+public final class PlayApi: NSObject, URLSessionDelegate {
     public static let shared = PlayApi()
-    private init() {}
 
-    /// 测试服务器连通性
-    public func checkHealth(serverUrl: String) async throws -> HealthResponse {
+    private lazy var insecureSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }()
+
+    private override init() {
+        super.init()
+    }
+
+    /// URLSessionDelegate: 放行自签名证书或 IP 访问直连
+    public func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let serverTrust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    private func getSession(allowInsecure: Bool) -> URLSession {
+        return allowInsecure ? insecureSession : URLSession.shared
+    }
+
+    /// 测试服务器连通性（支持自签名证书）
+    public func checkHealth(serverUrl: String, allowInsecure: Bool? = nil) async throws -> HealthResponse {
         guard let base = URL(string: serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
               let url = URL(string: "\(base.absoluteString)/api/health") else {
             throw PlayApiError.invalidServerUrl
         }
+
+        let shouldAllowInsecure = allowInsecure ?? (UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true)
+        let session = getSession(allowInsecure: shouldAllowInsecure)
 
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5.0)
         request.httpMethod = "GET"
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
             }
@@ -56,12 +85,16 @@ public final class PlayApi {
         serverUrl: String,
         itemId: Int,
         cookieString: String?,
-        mode: String = "builtin"
+        mode: String = "builtin",
+        allowInsecure: Bool? = nil
     ) async throws -> PlayResponse {
         guard let base = URL(string: serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
               let url = URL(string: "\(base.absoluteString)/api/play/\(itemId)") else {
             throw PlayApiError.invalidServerUrl
         }
+
+        let shouldAllowInsecure = allowInsecure ?? (UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true)
+        let session = getSession(allowInsecure: shouldAllowInsecure)
 
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10.0)
         request.httpMethod = "POST"
@@ -78,7 +111,7 @@ public final class PlayApi {
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw PlayApiError.badResponse(statusCode: 0, message: "无有效响应")
             }
@@ -103,7 +136,7 @@ public final class PlayApi {
     }
 
     /// 下载外挂字幕文本
-    public func fetchSubtitleContent(serverUrl: String, subtitlePath: String) async throws -> String {
+    public func fetchSubtitleContent(serverUrl: String, subtitlePath: String, allowInsecure: Bool? = nil) async throws -> String {
         let fullUrlString: String
         if subtitlePath.lowercased().hasPrefix("http://") || subtitlePath.lowercased().hasPrefix("https://") {
             fullUrlString = subtitlePath
@@ -117,11 +150,14 @@ public final class PlayApi {
             throw PlayApiError.invalidServerUrl
         }
 
+        let shouldAllowInsecure = allowInsecure ?? (UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true)
+        let session = getSession(allowInsecure: shouldAllowInsecure)
+
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10.0)
         request.httpMethod = "GET"
         request.setValue("1", forHTTPHeaderField: "X-StrmAction-Companion")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw PlayApiError.badResponse(statusCode: 0, message: "字幕下载失败")
         }
