@@ -22,8 +22,6 @@ public final class ProgressEngine: NSObject, URLSessionDelegate, URLSessionTaskD
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 5.0
         config.timeoutIntervalForResource = 15.0
-        config.tlsMinimumSupportedProtocolVersion = .tlsProtocol12
-        config.tlsMaximumSupportedProtocolVersion = .tlsProtocol13
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 

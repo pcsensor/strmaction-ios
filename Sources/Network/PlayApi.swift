@@ -28,8 +28,6 @@ public final class PlayApi: NSObject, URLSessionDelegate, URLSessionTaskDelegate
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10.0
         config.timeoutIntervalForResource = 30.0
-        config.tlsMinimumSupportedProtocolVersion = .tlsProtocol12
-        config.tlsMaximumSupportedProtocolVersion = .tlsProtocol13
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
