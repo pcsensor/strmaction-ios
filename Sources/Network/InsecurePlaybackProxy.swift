@@ -218,6 +218,7 @@ final class InsecurePlaybackProxy {
         let sessionID = parts[1]
         let payload = parts[2]
         // 本方法运行在代理串行队列上，直接访问受该队列保护的状态。
+        D.log("proxy", "FFmpeg 请求头 range=\(headers["range"] ?? "无") ua=\(headers["user-agent"] ?? "无")")
         guard let sessionHeaders = sessions[sessionID] else {
             sendSimpleError(connection: connection, status: 404, reason: "Not Found")
             return
@@ -352,6 +353,10 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
     private var pending = Data()
     private var isSending = false
     private var isTaskSuspended = false
+    /// 诊断计数（临时）
+    private var receivedBytes = 0
+    private var sentBytes = 0
+    private var heartbeatTimer: DispatchSourceTimer?
 
     init(
         connection: NWConnection,
@@ -377,6 +382,23 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
         delegateQueue = operationQueue
 
         super.init()
+
+        // 临时诊断：每 3 秒打一条，即使完全没有数据也能看出卡在哪一层。
+        // 收=0 → 上游 body 没来；pending 持续增长且 isSending=true → 往 FFmpeg 发不出去；
+        // 收/发都在涨 → 链路正常，瓶颈在解码侧（例如 MP4 的 moov 在文件尾部）。
+        let timer = DispatchSource.makeTimerSource(queue: stateQueue)
+        timer.schedule(deadline: .now() + 3, repeating: 3)
+        timer.setEventHandler { [weak self] in
+            guard let self, !self.finished else { return }
+            D.log("proxy", "心跳 收=\(self.receivedBytes) 发=\(self.sentBytes) pending=\(self.pending.count) isSending=\(self.isSending) 挂起=\(self.isTaskSuspended)")
+        }
+        timer.resume()
+        heartbeatTimer = timer
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
     }
 
     func start() {
@@ -478,6 +500,7 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
 
         let reason = Self.reasonPhrase(for: statusCode)
         let head = "HTTP/1.1 \(statusCode) \(reason)\r\n" + lines.joined(separator: "\r\n") + "\r\n\r\n"
+        D.log("proxy", "回给 FFmpeg 的响应头: \(lines.joined(separator: " | "))")
         let data = Data(head.utf8)
         connection.send(content: data, completion: .contentProcessed { [weak self] error in
             guard error != nil, let self else { return }
@@ -515,10 +538,12 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
             self.stateQueue.async { [weak self] in
                 guard let self else { return }
                 self.isSending = false
-                if error != nil {
+                if let error {
+                    D.log("proxy", "发给 FFmpeg 失败: \(error.localizedDescription) 已发=\(self.sentBytes)")
                     self.cancel()
                     return
                 }
+                self.sentBytes += count
                 if self.pending.count < Self.resumePendingBytes {
                     self.resumeTaskIfNeeded()
                 }
@@ -542,6 +567,7 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
     private func finishClient() {
         guard !finished else { return }
         finished = true
+        stopHeartbeat()
         isTaskSuspended = false
         task?.cancel()
         urlSession?.finishTasksAndInvalidate()
@@ -555,6 +581,7 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
     private func cancel() {
         guard !finished else { return }
         finished = true
+        stopHeartbeat()
         isTaskSuspended = false
         task?.cancel()
         urlSession?.invalidateAndCancel()
@@ -658,6 +685,7 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
         let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
         let pathExtension = finalURL.pathExtension.lowercased()
         isPlaylist = pathExtension == "m3u8" || contentType.contains("mpegurl")
+        D.log("proxy", "handleResponse status=\(http.statusCode) isPlaylist=\(isPlaylist) forcedLen=\(Self.contentLength(http).map(String.init) ?? "nil") ext=\(pathExtension)")
 
         if method == "HEAD" || http.statusCode == 204 || http.statusCode == 304 {
             sendHeaders(
@@ -692,6 +720,12 @@ private final class PlaybackProxyTransaction: NSObject, URLSessionDataDelegate, 
                     self.sendProxyError(status: 502, message: "HLS 播放列表过大")
                 }
             } else {
+                let before = self.receivedBytes
+                self.receivedBytes += data.count
+                // 首包必记，之后每跨过 4MB 记一次，用于判断 body 是否在流动。
+                if before == 0 || self.receivedBytes / (4 * 1024 * 1024) != before / (4 * 1024 * 1024) {
+                    D.log("proxy", "上游数据 total=\(self.receivedBytes) 本次=\(data.count) pending=\(self.pending.count + data.count)")
+                }
                 self.enqueue(data)
             }
         }
