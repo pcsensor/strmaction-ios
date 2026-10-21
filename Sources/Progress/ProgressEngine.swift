@@ -50,15 +50,8 @@ public final class ProgressEngine: NSObject, URLSessionDelegate, URLSessionTaskD
         _ challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        let allowInsecure = UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true
-        guard allowInsecure,
-              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let serverTrust = challenge.protectionSpace.serverTrust else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-
-        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        // 与媒体、API 两条通道共用同一套证书固定策略。
+        SecurityPolicy.handleServerTrust(challenge, completionHandler: completionHandler)
     }
 
     /// 入队并触发异步上报

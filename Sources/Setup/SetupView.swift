@@ -3,7 +3,8 @@ import SwiftUI
 public struct SetupView: View {
     @AppStorage("server_url") private var serverUrl: String = ""
     @AppStorage("cache_limit_mb") private var cacheLimitMb: Int = 128
-    @AppStorage("allow_insecure_http") private var allowInsecureHttp: Bool = true
+    @State private var showTrust = false
+    @ObservedObject private var trustStore = TLSTrustStore.shared
     @Binding var isPresented: Bool
 
     @State private var inputUrl: String = ""
@@ -91,17 +92,26 @@ public struct SetupView: View {
                         .background(Color(hex: "#14161C"))
                         .cornerRadius(8)
 
-                        Toggle(isOn: $allowInsecureHttp) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("允许局域网 HTTP / 自签名证书")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(.white)
-                                Text("支持内网未配置 HTTPS 的家庭服务器直连")
-                                    .font(.system(size: 11))
+                        Button {
+                            showTrust = true
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("证书信任")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.white)
+                                    Text(trustSummary)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color(hex: "#8A93A5"))
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 13, weight: .semibold))
                                     .foregroundColor(Color(hex: "#8A93A5"))
                             }
+                            .contentShape(Rectangle())
                         }
-                        .toggleStyle(SwitchToggleStyle(tint: Color(hex: "#E8B06A")))
+                        .buttonStyle(.plain)
                         .padding()
                         .background(Color(hex: "#14161C"))
                         .cornerRadius(8)
@@ -154,6 +164,17 @@ public struct SetupView: View {
                 isSuccess = true
             }
         }
+        .sheet(isPresented: $showTrust) {
+            TrustManagementView()
+        }
+    }
+
+    /// 证书信任摘要，展示当前已固定的服务器数量。
+    private var trustSummary: String {
+        if trustStore.pins.isEmpty {
+            return "首次连接自签名服务时自动固定证书指纹"
+        }
+        return "已固定 \(trustStore.pins.count) 个服务器 · 点击查看指纹"
     }
 
     private func testConnection() {
@@ -166,7 +187,7 @@ public struct SetupView: View {
 
         Task {
             do {
-                let health = try await PlayApi.shared.checkHealth(serverUrl: clean, allowInsecure: allowInsecureHttp)
+                let health = try await PlayApi.shared.checkHealth(serverUrl: clean)
                 DispatchQueue.main.async {
                     self.isTesting = false
                     if health.ok {
@@ -190,7 +211,6 @@ public struct SetupView: View {
     private func saveAndEnter() {
         let clean = inputUrl.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         serverUrl = clean
-        UserDefaults.standard.set(allowInsecureHttp, forKey: "allow_insecure_http")
         isPresented = false
     }
 }

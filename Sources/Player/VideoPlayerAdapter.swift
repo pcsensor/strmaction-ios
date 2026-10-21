@@ -1,133 +1,96 @@
 import SwiftUI
 import AVFoundation
 import Combine
-import Darwin
-
-#if canImport(KSPlayer)
 import KSPlayer
-#endif
 
-/// 播放通道。
+/// 播放引擎适配层。
 ///
-/// 背景：回环代理最初是为 KSAVPlayer / AVFoundation 加的（它没有公开的证书信任回调）。
-/// 但 KSMEPlayer（FFmpeg）本身支持 `tls_verify=0`，可以直连自签名 HTTPS。
-/// 而实测发现经代理时上游吞吐只有 ~50 KB/s（代理转发本身没问题，收=发、pending=0），
-/// 瓶颈在 URLSession 这条 HTTP 栈上，导致 4.9GB 的片子连 moov 都读不完。
-public enum PlaybackTransport: String, CaseIterable {
-    /// 直连优先，出错自动回退到回环代理（默认）
-    case auto
-    /// 始终直连，不回退
-    case direct
-    /// 始终走回环代理
-    case proxy
-
-    public var displayName: String {
-        switch self {
-        case .auto: return "自动（直连优先）"
-        case .direct: return "直连"
-        case .proxy: return "回环代理"
-        }
-    }
-
-    static let defaultsKey = "playback_transport"
-
-    public static var current: PlaybackTransport {
-        get { PlaybackTransport(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .auto }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
-    }
-}
-
-/// 播放器统一协议与控制器
+/// 设计约束（不可放宽）：
+/// - **只有一个内核**：KSMEPlayer（FFmpeg）。不保留 AVFoundation 运行路径，
+///   因为它无法处理自签名证书，留着的唯一结果就是一条注定失败的隐式回退。
+/// - **不代理**：交给 FFmpeg 的永远是原始 URL，字节不经过任何中间层。
+/// - **不回退**：任一环节失败即 `.failed(message)`，message 为底层原始错误。
 @MainActor
 public final class VideoPlayerController: ObservableObject {
-    @Published public var isPlaying: Bool = false
-    @Published public var currentPositionMs: Int64 = 0
-    @Published public var durationMs: Int64 = 0
-    @Published public var bufferedPositionMs: Int64 = 0
-    @Published public var playbackSpeed: Double = 1.0
-    @Published public var isReady: Bool = false
-    @Published public var isAspectFill: Bool = false
-    @Published public var errorMessage: String? = nil
-    @Published public var isFinished: Bool = false
-    @Published public var isPiPActive: Bool = false
-    @Published public var subtitleText: String? = nil
+    // MARK: 对外状态
 
-    public var onPlaybackEnded: (() -> Void)?
+    @Published public private(set) var phase: PlaybackPhase = .idle
+    @Published public private(set) var isPlaying = false
+    @Published public private(set) var currentPositionMs: Int64 = 0
+    @Published public private(set) var durationMs: Int64 = 0
+    @Published public private(set) var bufferedPositionMs: Int64 = 0
+    @Published public var playbackSpeed: Double = 1.0
+    @Published public var isAspectFill: Bool = false
+    @Published public private(set) var errorMessage: String?
+    @Published public private(set) var isPiPActive: Bool = false
+    @Published public private(set) var subtitleText: String?
     @Published public private(set) var volume: Double = 1.0
 
-    fileprivate var avPlayer: AVPlayer?
-    private var timeObserverToken: Any?
-    private var cancellables = Set<AnyCancellable>()
-    /// 诊断日志节流用：上一次记录过的播放秒数。
-    private var lastDiagnosticPlaySecond: Int64 = -1
+    /// 交给 SwiftUI 的渲染图层参数。
+    @Published public private(set) var ksOptions: KSOptions?
+    @Published public private(set) var playbackURL: URL?
 
-    // 通道回退所需的上次 setup 参数
-    private var lastSetupURL: URL?
-    private var lastSetupHeaders: [String: String] = [:]
-    private var lastSetupResumeMs: Int64 = 0
-    private var lastSetupCacheMb: Int = 128
-    /// 「自动」模式下是否已经因为直连失败而回退过，避免无限重试。
-    private var didFallbackToProxy = false
-    /// 本次 setup 是否走了直连（决定出错时要不要回退）。
-    private var isUsingDirectTransport = false
-    /// 本次 setup 是否处于「ready 之前」，用于判定回退时机。
-    private var hasEverBeenReady = false
+    public var onPlaybackEnded: (() -> Void)?
 
-    #if canImport(KSPlayer)
+    public var isReady: Bool { phase == .ready }
+
+    // MARK: 内部
+
     public let ksCoordinator = KSVideoPlayer.Coordinator()
-    @Published public var ksOptions: KSOptions?
+
     private var selectedSubtitleFileURL: URL?
     private var setupResumeMs: Int64 = 0
     private var pipStateCancellable: AnyCancellable?
     private weak var boundPiPLayer: KSPlayerLayer?
-    #endif
 
-    /// 实际交给播放器的地址。开启“允许自签名证书”时，这会是本机回环代理地址。
-    @Published public private(set) var playbackURL: URL?
-    private var playbackProxySession: InsecurePlaybackSession?
+    private var connectTimeoutTask: Task<Void, Never>?
+    /// 诊断节流：上次记录过的播放秒数。
+    private var lastDiagnosticSecond: Int64 = -1
+
+    private static let connectTimeoutSeconds: UInt64 = 20
 
     public init() {}
 
-    public func setup(
-        url: URL,
-        headers: [String: String],
-        resumeMs: Int64,
-        cacheLimitMb: Int = 128,
-        forceProxy: Bool = false
-    ) {
-        // 记录参数，供「直连失败自动回退代理」使用。
-        lastSetupURL = url
-        lastSetupHeaders = headers
-        lastSetupResumeMs = max(0, resumeMs)
-        lastSetupCacheMb = cacheLimitMb
-        hasEverBeenReady = false
-        // 用户主动发起的 setup 才重置回退计数；回退自己调用的那次（forceProxy=true）不重置。
-        if !forceProxy {
-            didFallbackToProxy = false
+    /// 由上层在进入引擎之前就发现的问题（例如服务端返回的 URL 无法解析）上报。
+    /// 与其它失败一样，走同一条 `.failed` 通道，不另设标志位。
+    public func reportUnplayableSource(_ reason: String) {
+        resetState()
+        fail(reason)
+    }
+
+    // MARK: - 装载
+
+    /// 建立证书固定关系、组装选项、创建图层。整个过程是确定的单行道。
+    public func load(_ request: PlaybackRequest) async {
+        D.log("engine", "load \(request.url.absoluteString.prefix(110)) resumeMs=\(request.resumeMs) cacheMb=\(request.cacheLimitMb)")
+
+        resetState()
+        phase = .resolving
+
+        // 1. 证书固定（仅 https）
+        if request.url.scheme?.lowercased() == "https" {
+            let hostKey = TLSTrustStore.hostKey(host: request.url.host ?? "", port: request.url.port)
+            phase = .pinning(hostKey: hostKey)
+            do {
+                try await SecurityPolicy.ensurePinned(for: request.url)
+            } catch {
+                fail(error.localizedDescription)
+                return
+            }
         }
 
-        D.log("setup", "开始 url=\(url.absoluteString.prefix(120)) resumeMs=\(resumeMs) cacheMb=\(cacheLimitMb) forceProxy=\(forceProxy)")
-        D.log("setup", "请求头 keys=\(headers.keys.sorted().joined(separator: ","))")
-        if let ua = headers.first(where: { $0.key.lowercased() == "user-agent" })?.value {
-            D.log("setup", "服务端下发 UA=\(ua.prefix(100))")
-        } else {
-            D.log("setup", "服务端未下发 User-Agent")
+        // 2. 选项
+        let options: KSOptions
+        do {
+            options = try MediaTransport.makeOptions(for: request)
+        } catch {
+            fail(error.localizedDescription)
+            return
         }
-        D.log("setup", "代理开关 allow_insecure_http=\(InsecurePlaybackProxy.isEnabled)")
 
-        isPlaying = false
-        isReady = false
-        isFinished = false
-        isPiPActive = false
-        errorMessage = nil
-        subtitleText = nil
-        currentPositionMs = max(0, resumeMs)
-        durationMs = 0
-        bufferedPositionMs = 0
+        guard !Task.isCancelled else { return }
 
-        #if canImport(KSPlayer)
-        // 先移除旧图层并重建底层 player layer；仅修改 URL 不会让 KSPlayer 重建播放器。
-        // 先把 ksOptions 清空，避免旧 options 与新代理地址组合后短暂创建出错误的播放器。
+        // 3. 重建图层
         if let oldLayer = ksCoordinator.playerLayer, oldLayer.isPipActive {
             oldLayer.isPipActive = false
         }
@@ -136,260 +99,81 @@ public final class VideoPlayerController: ObservableObject {
         boundPiPLayer = nil
         ksOptions = nil
         ksCoordinator.resetPlayer()
-        #endif
 
-        // 自签名开关开启时，所有 HTTPS 播放地址都改走本机回环代理，
-        // 让 FFmpeg 和 AVFoundation 都不直接处理远端证书。
-        playbackProxySession?.invalidate()
-        playbackProxySession = nil
-
-        // 通道决策：默认「直连优先」。
-        // FFmpeg（KSMEPlayer）能靠 tls_verify=0 直连自签名 HTTPS，
-        // 而经 URLSession 代理时实测上游吞吐只有 ~50 KB/s，大文件根本来不及读 moov。
-        let transport = PlaybackTransport.current
-        let useProxyWanted: Bool = {
-            if forceProxy { return true }
-            switch transport {
-            case .proxy: return true
-            case .direct: return false
-            case .auto: return false
-            }
-        }()
-        let scheme = url.scheme?.lowercased() ?? ""
-        let proxyCapable = InsecurePlaybackProxy.isEnabled && (scheme == "http" || scheme == "https")
-
-        let resolvedURL: URL
-        if useProxyWanted, proxyCapable,
-           let proxySession = InsecurePlaybackProxy.shared.makeSession(remoteURL: url, headers: headers)
-        {
-            playbackProxySession = proxySession
-            resolvedURL = proxySession.localURL
-            isUsingDirectTransport = false
-        } else {
-            resolvedURL = url
-            isUsingDirectTransport = true
-            if useProxyWanted, !proxyCapable {
-                D.log("setup", "本想走代理但条件不满足（scheme=\(scheme) 开关=\(InsecurePlaybackProxy.isEnabled)），改为直连")
-            }
-        }
-        playbackURL = resolvedURL
-        D.log("setup", "通道=\(transport.rawValue)\(forceProxy ? "(强制代理)" : "") → "
-              + (isUsingDirectTransport
-                 ? "直连远端 \(resolvedURL.absoluteString.prefix(120))"
-                 : "回环代理 \(resolvedURL.absoluteString.prefix(120))"))
-
-        #if canImport(KSPlayer)
-        let options = KSOptions()
-        // 设置 302 重定向请求头保持与网络参数
-        options.appendHeader(headers)
-        // 允许自签名或无校验的 TLS/HTTPS 直链
-        options.formatContextOptions["tls_verify"] = "0"
-        // KSPlayer 2.3.x 移除了实例 isAutoPlay，图层默认自动 prepare；
-        // 播放时机由下面 onStateChanged(.readyToPlay) 统一控制。
-        options.isSeekedAutoPlay = true
-        // 由 App 统一注册 MPRemoteCommandCenter，避免与 KSPlayer 重复响应。
-        options.registerRemoteControll = false
-        options.canStartPictureInPictureAutomaticallyFromInline = true
-
-        // cache_limit_mb 映射为 KSPlayer 的最大缓存时长。
-        // KSPlayer 只暴露时长配置，这里按约 8 Mbps 估算：1 MB ≈ 1 秒。
-        let normalizedCacheLimit = max(0, cacheLimitMb)
-        options.cache = normalizedCacheLimit > 0
-        if normalizedCacheLimit > 0 {
-            let cacheSeconds = min(300.0, max(15.0, Double(normalizedCacheLimit)))
-            options.maxBufferDuration = cacheSeconds
-            options.preferredForwardBufferDuration = min(cacheSeconds, max(3.0, cacheSeconds / 4.0))
-        }
-
-        // 回环代理本身是 HTTP，不要再让 FFmpeg 读取系统代理环境变量；
-        // 未启用代理时恢复 KSPlayer 的默认行为。
-        if playbackProxySession != nil {
-            KSOptions.useSystemHTTPProxy = false
-            unsetenv("http_proxy")
-            unsetenv("https_proxy")
-        } else {
-            KSOptions.useSystemHTTPProxy = true
-        }
-        KSOptions.firstPlayerType = KSMEPlayer.self
-        KSOptions.secondPlayerType = KSAVPlayer.self
-        // 诊断：缓存模式会让 KSPlayer 先攒够一段缓冲才进 readyToPlay，
-        // 对超大文件 + 慢上游来说，这会表现为长期停在 preparing。
-        D.log("setup", "options cache=\(options.cache) maxBuffer=\(options.maxBufferDuration)s 预读=\(options.preferredForwardBufferDuration)s tlsVerify=\(options.formatContextOptions["tls_verify"] ?? "-")")
-        self.setupResumeMs = max(0, resumeMs)
+        setupResumeMs = request.resumeMs
+        playbackURL = request.url
         installKSPlayerCallbacks()
-        // 最后再发布 options，确保 SwiftUI 创建图层时回调与续播位置都已就绪。
-        self.ksOptions = options
+        ksOptions = options
 
-        // 重试/重新 setup 时恢复用户已选择的字幕。
-        DispatchQueue.main.async { [weak self] in
-            self?.reapplySelectedSubtitle()
-        }
-        #else
-        // Fallback: 原生 AVPlayer 方案
-        let asset = AVURLAsset(url: resolvedURL, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
-        let playerItem = AVPlayerItem(asset: asset)
-        let player = AVPlayer(playerItem: playerItem)
-        player.volume = Float(volume)
-        self.avPlayer = player
+        phase = .connecting
+        lastDiagnosticSecond = -1
+        startConnectTimeout()
 
-        // 监听播放状态
-        NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime, object: playerItem)
-            .sink { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.isFinished = true
-                    self?.isPlaying = false
-                    self?.onPlaybackEnded?()
-                }
-            }
-            .store(in: &cancellables)
-
-        // 监听缓冲与时长
-        playerItem.publisher(for: \.loadedTimeRanges)
-            .sink { [weak self] ranges in
-                if let first = ranges.first?.timeRangeValue {
-                    let buffered = CMTimeGetSeconds(first.start) + CMTimeGetSeconds(first.duration)
-                    DispatchQueue.main.async {
-                        self?.bufferedPositionMs = Int64(buffered * 1000)
-                    }
-                }
-            }
-            .store(in: &cancellables)
-
-        playerItem.publisher(for: \.status)
-            .sink { [weak self] status in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    if status == .readyToPlay {
-                        self.isReady = true
-                        let dur = CMTimeGetSeconds(playerItem.duration)
-                        if !dur.isNaN && dur > 0 {
-                            self.durationMs = Int64(dur * 1000)
-                        }
-                        if resumeMs > 0 {
-                            self.seek(toMs: resumeMs)
-                        }
-                        self.play()
-                    } else if status == .failed {
-                        self.errorMessage = playerItem.error?.localizedDescription ?? "播放失败"
-                    }
-                }
-            }
-            .store(in: &cancellables)
-
-        // 周期性进度监听
-        let interval = CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self = self else { return }
-            let secs = CMTimeGetSeconds(time)
-            if !secs.isNaN && secs >= 0 {
-                self.currentPositionMs = Int64(secs * 1000)
-            }
-            self.isPlaying = (player.timeControlStatus == .playing)
-        }
-        #endif
+        reapplySelectedSubtitle()
     }
 
+    // MARK: - 播放控制
+
     public func play() {
-        isFinished = false
-        #if canImport(KSPlayer)
         ksCoordinator.playerLayer?.play()
         isPlaying = true
-        #else
-        avPlayer?.play()
-        avPlayer?.rate = Float(playbackSpeed)
-        isPlaying = true
-        #endif
     }
 
     public func pause() {
-        #if canImport(KSPlayer)
         ksCoordinator.playerLayer?.pause()
         isPlaying = false
-        #else
-        avPlayer?.pause()
-        isPlaying = false
-        #endif
     }
 
     public func togglePlayPause() {
-        if isPlaying {
-            pause()
-        } else {
-            play()
-        }
+        isPlaying ? pause() : play()
     }
 
     public func seek(toMs: Int64) {
-        let upperBound = durationMs > 0 ? durationMs : toMs
-        let target = max(0, min(toMs, upperBound))
-        isFinished = false
+        let upper = durationMs > 0 ? durationMs : toMs
+        let target = max(0, min(toMs, upper))
         currentPositionMs = target
-        #if canImport(KSPlayer)
         ksCoordinator.seek(time: TimeInterval(target) / 1000.0)
-        #else
-        let targetTime = CMTime(seconds: Double(target) / 1000.0, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        avPlayer?.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        #endif
     }
 
     public func skip(seconds: Int64) {
-        let target = max(0, min(durationMs > 0 ? durationMs : Int64.max, currentPositionMs + seconds * 1000))
-        seek(toMs: target)
+        let upper = durationMs > 0 ? durationMs : Int64.max
+        seek(toMs: max(0, min(upper, currentPositionMs + seconds * 1000)))
     }
 
     public func setSpeed(_ speed: Double) {
         playbackSpeed = speed
-        #if canImport(KSPlayer)
         ksCoordinator.playbackRate = Float(speed)
-        #else
-        if isPlaying {
-            avPlayer?.rate = Float(speed)
-        }
-        #endif
     }
 
     public func toggleAspect() {
         isAspectFill.toggle()
-        #if canImport(KSPlayer)
         ksCoordinator.isScaleAspectFill = isAspectFill
-        #endif
     }
 
-    /// 调节播放器音量（0...1）。使用播放器音量而非系统音量，避免修改全局设置。
     public func setVolume(_ value: Double) {
         let clamped = max(0, min(1, value))
         volume = clamped
-        #if canImport(KSPlayer)
         ksCoordinator.playerLayer?.player.playbackVolume = Float(clamped)
-        #else
-        avPlayer?.volume = Float(clamped)
-        #endif
     }
+
+    // MARK: - 画中画
 
     public var isPiPAvailable: Bool {
-        #if canImport(KSPlayer)
-        return ksCoordinator.playerLayer?.player.pipController != nil
-        #else
-        return false
-        #endif
+        ksCoordinator.playerLayer?.player.pipController != nil
     }
 
-    /// 切换画中画。返回切换后的状态；不支持 PiP 时返回 false。
     @discardableResult
     public func togglePiP() -> Bool {
-        #if canImport(KSPlayer)
         guard let layer = ksCoordinator.playerLayer, layer.player.pipController != nil else {
             return false
         }
         layer.isPipActive.toggle()
         isPiPActive = layer.isPipActive
         return layer.isPipActive
-        #else
-        return false
-        #endif
     }
 
-    /// 下载并加载外挂字幕。通过 PlayApi 下载，确保自签名 HTTPS 服务端也可用。
+    // MARK: - 字幕
+
     public func loadSubtitle(_ subtitle: SubtitleEntry, serverUrl: String) async throws {
         let data = try await PlayApi.shared.fetchSubtitleData(
             serverUrl: serverUrl,
@@ -407,93 +191,69 @@ public final class VideoPlayerController: ObservableObject {
             .appendingPathComponent("strmaction-subtitle-\(UUID().uuidString).\(ext)")
         try data.write(to: fileURL, options: .atomic)
 
-        #if canImport(KSPlayer)
         if let oldURL = selectedSubtitleFileURL {
             try? FileManager.default.removeItem(at: oldURL)
         }
         selectedSubtitleFileURL = fileURL
         ksCoordinator.subtitleModel.selectedSubtitleInfo = URLSubtitleInfo(url: fileURL)
-        #else
-        try? FileManager.default.removeItem(at: fileURL)
-        #endif
+        D.log("engine", "字幕已加载 \(subtitle.label)")
     }
 
     public func clearSubtitle() {
-        #if canImport(KSPlayer)
         ksCoordinator.subtitleModel.selectedSubtitleInfo = nil
         if let oldURL = selectedSubtitleFileURL {
             try? FileManager.default.removeItem(at: oldURL)
         }
         selectedSubtitleFileURL = nil
-        #endif
         subtitleText = nil
     }
 
-    #if canImport(KSPlayer)
-    /// 重新安装回调。图层重建/重试时会由新的 KSPlayerLayer 接管 delegate，
-    /// 因此每次挂载图层后都需要再次安装 App 的回调。
+    private func reapplySelectedSubtitle() {
+        guard let fileURL = selectedSubtitleFileURL else { return }
+        ksCoordinator.subtitleModel.selectedSubtitleInfo = URLSubtitleInfo(url: fileURL)
+    }
+
+    // MARK: - 回调
+
+    /// 图层创建/重建后必须重新安装回调。由 `KSPlayerSurfaceView.updateUIView` 调用。
     public func installKSPlayerCallbacks() {
         ksCoordinator.onStateChanged = { [weak self] layer, state in
             let layerURL = layer.url.absoluteString
             DispatchQueue.main.async {
-                guard let self = self else {
-                    D.log("state", "\(state) 但 self 已释放（layerURL=\(layerURL.prefix(50))）")
-                    return
-                }
+                guard let self else { return }
                 let isCurrent = self.ksCoordinator.playerLayer === layer
-                // 这条日志是关键：若 isCurrent=false，说明图层已被重建，
-                // 旧图层的状态会被静默丢弃，表现为永远不 ready。
-                D.log("state", "\(state) 是当前图层=\(isCurrent) layerURL=\(layerURL.prefix(60))")
+                D.log("state", "\(state) 是当前图层=\(isCurrent) url=\(layerURL.prefix(50))")
                 guard isCurrent else { return }
+
                 if state == .readyToPlay {
-                    self.hasEverBeenReady = true
-                    self.isReady = true
-                    self.applyVolume()
-                    self.ksCoordinator.playbackRate = Float(self.playbackSpeed)
-                    self.ksCoordinator.isScaleAspectFill = self.isAspectFill
-                    // subtitleModel.url 在图层创建时会被异步重置，就绪后再恢复一次外挂字幕。
-                    self.reapplySelectedSubtitle()
-                    if self.setupResumeMs > 0 {
-                        let resumeMs = self.setupResumeMs
-                        self.setupResumeMs = 0
-                        self.ksCoordinator.seek(time: TimeInterval(resumeMs) / 1000.0)
-                    } else {
-                        self.play()
-                    }
+                    self.enterReady()
                 } else if state == .error {
-                    self.isReady = false
-                    self.isPlaying = false
-                    if self.errorMessage == nil {
-                        self.errorMessage = "播放器加载失败"
-                    }
-                    self.fallbackToProxyIfNeeded(reason: "state=.error")
+                    self.fail("播放器进入错误状态")
                 }
             }
         }
 
         ksCoordinator.onPlay = { [weak self] current, total in
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                guard let layer = self.ksCoordinator.playerLayer else {
-                    D.log("play", "回调触发但 playerLayer 为 nil（pos=\(current)）")
-                    return
-                }
-                // 每 2 秒记一条，避免刷爆环形缓冲；首帧一定记。
+                guard let self, self.ksCoordinator.playerLayer != nil else { return }
+
                 let second = Int64(current)
-                if self.lastDiagnosticPlaySecond < 0 || (second % 2 == 0 && second != self.lastDiagnosticPlaySecond) {
-                    self.lastDiagnosticPlaySecond = second
-                    D.log("play", String(
-                        format: "pos=%.2f total=%.2f isPlaying=%@ layerURL=%@",
-                        current, total,
-                        self.ksCoordinator.state.isPlaying ? "true" : "false",
-                        String(layer.url.absoluteString.prefix(50))
-                    ))
+                if self.lastDiagnosticSecond < 0 || (second % 3 == 0 && second != self.lastDiagnosticSecond) {
+                    self.lastDiagnosticSecond = second
+                    D.log("play", String(format: "pos=%.2f total=%.2f", current, total))
                 }
+
                 self.currentPositionMs = Int64(current * 1000)
                 if total > 0 {
                     self.durationMs = Int64(total * 1000)
                 }
                 self.isPlaying = self.ksCoordinator.state.isPlaying
+
+                // 有数据在动即脱离「连接中」。不在这里直接判 ready，
+                // 以免把「刚拿到首包」误当成「已经可播」。
+                if self.phase == .connecting || self.phase == .buffering {
+                    self.phase = total > 0 ? .ready : .buffering
+                }
 
                 let subtitle = self.ksCoordinator.subtitleModel.parts
                     .compactMap { $0.text?.string }
@@ -505,58 +265,30 @@ public final class VideoPlayerController: ObservableObject {
 
         ksCoordinator.onBufferChanged = { [weak self] _, buffered in
             DispatchQueue.main.async {
-                guard let self = self, self.ksCoordinator.playerLayer != nil else { return }
+                guard let self, self.ksCoordinator.playerLayer != nil else { return }
                 self.bufferedPositionMs = Int64(buffered * 1000)
             }
         }
 
         ksCoordinator.onFinish = { [weak self] layer, error in
-            let reason = error.map { $0.localizedDescription } ?? "正常结束"
+            let reason = error?.localizedDescription
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self else { return }
                 let isCurrent = self.ksCoordinator.playerLayer === layer
-                D.log("finish", "\(reason) 是当前图层=\(isCurrent)")
+                D.log("finish", "\(reason ?? "正常结束") 是当前图层=\(isCurrent)")
                 guard isCurrent else { return }
+
                 self.isPlaying = false
-                if let err = error {
-                    self.isReady = false
-                    self.errorMessage = err.localizedDescription
-                    self.fallbackToProxyIfNeeded(reason: err.localizedDescription)
+                if let reason {
+                    self.fail(reason)
                 } else {
-                    self.isFinished = true
+                    self.phase = .ready
                     self.onPlaybackEnded?()
                 }
             }
         }
     }
 
-    /// 「自动」模式下，直连失败且尚未成功播放过时，自动回退到回环代理重试一次。
-    /// 这样既享受直连的高吞吐，又不会在直连不可用的环境下彻底失去播放能力。
-    private func fallbackToProxyIfNeeded(reason: String) {
-        guard isUsingDirectTransport,
-              PlaybackTransport.current == .auto,
-              !didFallbackToProxy,
-              !hasEverBeenReady,
-              let url = lastSetupURL
-        else { return }
-
-        didFallbackToProxy = true
-        let resume = currentPositionMs > 0 ? currentPositionMs : lastSetupResumeMs
-        D.log("setup", "直连失败（\(reason)），自动回退到回环代理重试，resumeMs=\(resume)")
-        setup(
-            url: url,
-            headers: lastSetupHeaders,
-            resumeMs: resume,
-            cacheLimitMb: lastSetupCacheMb,
-            forceProxy: true
-        )
-    }
-
-    private func applyVolume() {
-        ksCoordinator.playerLayer?.player.playbackVolume = Float(volume)
-    }
-
-    /// 同步系统侧退出画中画后的按钮状态。
     public func bindPiPState(for layer: KSPlayerLayer) {
         guard boundPiPLayer !== layer else { return }
         boundPiPLayer = layer
@@ -568,24 +300,72 @@ public final class VideoPlayerController: ObservableObject {
             }
     }
 
-    private func reapplySelectedSubtitle() {
-        guard let fileURL = selectedSubtitleFileURL else { return }
-        ksCoordinator.subtitleModel.selectedSubtitleInfo = URLSubtitleInfo(url: fileURL)
-    }
-    #endif
+    // MARK: - 状态转移
 
-    public func destroy() {
-        // 若这一行在 setup 之后不久就出现，说明播放器被提前销毁了，
-        // 这正是「UI 还在但永远不播」的典型信号。
-        D.log("destroy", "销毁播放器")
+    private func enterReady() {
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+
+        isPlaying = true
+        ksCoordinator.playbackRate = Float(playbackSpeed)
+        ksCoordinator.isScaleAspectFill = isAspectFill
+        ksCoordinator.playerLayer?.player.playbackVolume = Float(volume)
+        reapplySelectedSubtitle()
+
+        phase = .ready
+
+        if setupResumeMs > 0 {
+            let resume = setupResumeMs
+            setupResumeMs = 0
+            ksCoordinator.seek(time: TimeInterval(resume) / 1000.0)
+        } else {
+            play()
+        }
+    }
+
+    private func fail(_ reason: String) {
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        D.log("engine", "失败: \(reason)")
+        errorMessage = reason
         isPlaying = false
-        isReady = false
+        phase = .failed(reason)
+    }
+
+    /// 连接阶段超时。只在 `.connecting` 阶段计时；一旦有数据在动就取消，
+    /// 因为慢速源上「缓冲得慢」是正常状态，不该被判为失败。
+    private func startConnectTimeout() {
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.connectTimeoutSeconds * 1_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            guard self.phase == .connecting else { return }
+            self.fail("连接媒体源超时（\(Self.connectTimeoutSeconds) 秒无响应）")
+        }
+    }
+
+    // MARK: - 生命周期
+
+    private func resetState() {
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        isPlaying = false
+        currentPositionMs = 0
+        durationMs = 0
+        bufferedPositionMs = 0
         isPiPActive = false
         subtitleText = nil
-        playbackProxySession?.invalidate()
-        playbackProxySession = nil
-        playbackURL = nil
-        #if canImport(KSPlayer)
+        errorMessage = nil
+        lastDiagnosticSecond = -1
+    }
+
+    /// 释放播放器。调用后 `phase` 回到 `.idle`。
+    public func destroy() {
+        D.log("engine", "destroy")
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        resetState()
+
         if let layer = ksCoordinator.playerLayer, layer.isPipActive {
             layer.isPipActive = false
         }
@@ -595,43 +375,30 @@ public final class VideoPlayerController: ObservableObject {
         pipStateCancellable = nil
         boundPiPLayer = nil
         ksCoordinator.resetPlayer()
+
         if let oldURL = selectedSubtitleFileURL {
             try? FileManager.default.removeItem(at: oldURL)
         }
         selectedSubtitleFileURL = nil
-        #else
-        if let token = timeObserverToken {
-            avPlayer?.removeTimeObserver(token)
-            timeObserverToken = nil
-        }
-        avPlayer?.pause()
-        avPlayer = nil
-        #endif
-        cancellables.removeAll()
+        playbackURL = nil
+        phase = .idle
     }
 }
 
-/// 播放器视频渲染图层 View
+// MARK: - 渲染图层
+
 public struct VideoSurfaceView: View {
     @ObservedObject public var controller: VideoPlayerController
     public let url: URL
-    public let headers: [String: String]
     public let resumeMs: Int64
 
-    public init(
-        controller: VideoPlayerController,
-        url: URL,
-        headers: [String: String],
-        resumeMs: Int64
-    ) {
+    public init(controller: VideoPlayerController, url: URL, resumeMs: Int64) {
         self.controller = controller
         self.url = url
-        self.headers = headers
         self.resumeMs = resumeMs
     }
 
     public var body: some View {
-        #if canImport(KSPlayer)
         if let options = controller.ksOptions {
             KSPlayerSurfaceView(
                 controller: controller,
@@ -642,16 +409,13 @@ public struct VideoSurfaceView: View {
         } else {
             Color.black.ignoresSafeArea()
         }
-        #else
-        AVPlayerSurfaceView(player: controller.avPlayer, isAspectFill: controller.isAspectFill)
-            .ignoresSafeArea()
-        #endif
     }
 }
 
-#if canImport(KSPlayer)
-/// 直接承载 KSPlayerLayer 的渲染 view，避免 KSVideoPlayer 在 URL 不变时无法重建播放器，
-/// 同时确保图层重建后回调仍由 App 安装。
+/// 直接承载 `KSPlayerLayer` 的渲染 view。
+///
+/// 不用官方 `KSVideoPlayer`：它在 URL 不变时无法重建播放器，
+/// 而切换剧集与重新装载都需要重建图层。
 struct KSPlayerSurfaceView: UIViewRepresentable {
     @ObservedObject var controller: VideoPlayerController
     let url: URL
@@ -664,35 +428,27 @@ struct KSPlayerSurfaceView: UIViewRepresentable {
     }
 
     func updateUIView(_ container: UIView, context: Context) {
-        // 仅在 URL 变化或重试后 playerLayer 为空时创建新图层。
-        // 频繁调用 makeView 会反复重置 subtitleModel.url，从而清空字幕选择。
-        let layerURL = controller.ksCoordinator.playerLayer?.url.absoluteString
-        let needsCreate = layerURL != url.absoluteString
-        D.log("surface", "updateUIView needsCreate=\(needsCreate) layerURL=\(layerURL?.prefix(60) ?? "nil") target=\(url.absoluteString.prefix(60))")
+        // 仅在 URL 变化或图层为空时创建，避免反复重置 subtitleModel。
+        let currentURL = controller.ksCoordinator.playerLayer?.url.absoluteString
+        let needsCreate = currentURL != url.absoluteString
 
         if needsCreate {
             _ = controller.ksCoordinator.makeView(url: url, options: options)
-            D.log("surface", "makeView 完成 playerLayer=\(controller.ksCoordinator.playerLayer == nil ? "nil" : "ok") playerView=\(controller.ksCoordinator.playerLayer?.player.view == nil ? "nil" : "ok")")
         }
 
-        // 回调必须在这里立刻安装，不能留到下面 player.view 就绪之后再做。
-        // KSPlayer 的渲染视图是异步创建的，makeView 刚返回时 layer.player.view 仍是 nil；
-        // 若把安装动作放在早退分支之后，就会在首帧被整个跳过。此后只要没有别的
-        // SwiftUI 状态变更触发第二次 updateUIView，回调就永远挂不上——
-        // 表现为播放不报错、duration 恒为 0、isReady 恒为 false，最终只剩超时提示。
+        // 回调必须在拿到图层后立刻安装，不能等 player.view 就绪——
+        // 渲染视图是异步创建的，若在早退分支跳过安装，且此后没有状态变更
+        // 触发第二次 updateUIView，回调就永远挂不上。
         controller.installKSPlayerCallbacks()
         if let layer = controller.ksCoordinator.playerLayer {
             controller.bindPiPState(for: layer)
         }
 
         guard let playerView = controller.ksCoordinator.playerLayer?.player.view else {
-            // 渲染视图尚未就绪：回调和 PiP 已经挂好，等 onPlay 发布进度触发重算后
-            // 会再次进入这里，届时把 view 补挂到容器即可。
             container.subviews.forEach { $0.removeFromSuperview() }
             return
         }
 
-        // KSPlayer 2.3+ 的 KSPlayerLayer 是 NSObject，真正的渲染视图在 player.view。
         if playerView.superview !== container {
             for subview in container.subviews where subview !== playerView {
                 subview.removeFromSuperview()
@@ -711,48 +467,5 @@ struct KSPlayerSurfaceView: UIViewRepresentable {
                 subview.removeFromSuperview()
             }
         }
-        // 回调与 PiP 绑定已在本方法开头完成，这里不再重复安装，
-        // 避免"看起来像是有两处安装点"而再次把安装逻辑写成条件执行。
     }
 }
-#endif
-
-#if !canImport(KSPlayer)
-/// 原生 AVPlayerLayer 视图封装
-struct AVPlayerSurfaceView: UIViewRepresentable {
-    let player: AVPlayer?
-    let isAspectFill: Bool
-
-    func makeUIView(context: Context) -> PlayerContainerUIView {
-        let view = PlayerContainerUIView()
-        view.playerLayer.player = player
-        view.playerLayer.videoGravity = isAspectFill ? .resizeAspectFill : .resizeAspect
-        return view
-    }
-
-    func updateUIView(_ uiView: PlayerContainerUIView, context: Context) {
-        uiView.playerLayer.player = player
-        uiView.playerLayer.videoGravity = isAspectFill ? .resizeAspectFill : .resizeAspect
-    }
-}
-
-class PlayerContainerUIView: UIView {
-    var playerLayer = AVPlayerLayer()
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .black
-        playerLayer.videoGravity = .resizeAspect
-        layer.addSublayer(playerLayer)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        playerLayer.frame = bounds
-    }
-}
-#endif

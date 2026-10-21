@@ -277,11 +277,18 @@ struct PlayerDrawerContent: View {
     let onCopyLink: () -> Void
     /// 临时诊断入口，排查完成后可整体移除。
     let onShowDiagnostics: () -> Void
-    /// 切换播放通道（直连 / 代理），切换后会立即重新起播。
-    let onCycleTransport: () -> Void
+    /// 打开证书信任管理（查看 / 撤销已固定的服务器指纹）。
+    let onShowTrust: () -> Void
 
-    private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+    @ObservedObject private var trustStore = TLSTrustStore.shared
+
+    private var speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
     private let longPressSpeeds: [Double] = [1.5, 2.0, 2.5, 3.0]
+
+    private var trustSubtitle: String {
+        if trustStore.pins.isEmpty { return "尚未固定任何服务器" }
+        return "已固定 \(trustStore.pins.count) 个服务器"
+    }
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -369,14 +376,14 @@ struct PlayerDrawerContent: View {
             ui.closeDrawer()
         }
 
-        // 播放通道：直连 vs 回环代理。点击循环切换并立即重新起播。
+        // 证书信任：查看当前固定的服务器指纹，可撤销后重新固定。
         PlayerDrawerActionRow(
-            icon: "arrow.triangle.branch",
-            title: "播放通道",
-            subtitle: "\(PlaybackTransport.current.displayName) · 点击切换",
+            icon: "checkmark.shield",
+            title: "证书信任",
+            subtitle: trustSubtitle,
             tint: PlayerTheme.textPrimary
         ) {
-            onCycleTransport()
+            onShowTrust()
         }
 
         // 临时诊断入口：进入后再点「复制全部」，把日志贴回来即可。

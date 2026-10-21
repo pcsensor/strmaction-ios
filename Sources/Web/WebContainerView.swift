@@ -94,21 +94,13 @@ public struct WebContainerView: UIViewRepresentable {
             print("[WebContainer] 初始导航失败: \(error.localizedDescription)")
         }
 
-        // 处理 HTTPS 自签名证书放行（支持纯 IP 直连）
+        // 处理 HTTPS 自签名证书：与媒体、API 通道共用同一套固定策略。
         public func webView(
             _ webView: WKWebView,
             didReceive challenge: URLAuthenticationChallenge,
             completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
         ) {
-            let allowInsecure = UserDefaults.standard.object(forKey: "allow_insecure_http") as? Bool ?? true
-            guard allowInsecure,
-                  challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-                  let serverTrust = challenge.protectionSpace.serverTrust else {
-                completionHandler(.performDefaultHandling, nil)
-                return
-            }
-
-            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+            SecurityPolicy.handleServerTrust(challenge, completionHandler: completionHandler)
         }
 
         // 处理网页 JavaScript alert

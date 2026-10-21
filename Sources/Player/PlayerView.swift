@@ -23,8 +23,7 @@ public struct PlayerView: View {
     @State private var selectedSubtitleId: String?
     @State private var subtitleLoadTask: Task<Void, Never>?
 
-    // 连接超时与自动连播
-    @State private var showTimeoutAlert = false
+    // 自动连播
     @State private var autoNextCountdown = 3
     @State private var showAutoNextOverlay = false
 
@@ -33,12 +32,15 @@ public struct PlayerView: View {
 
     // 临时诊断面板
     @State private var showDiagnostics = false
+    /// 证书信任管理面板
+    @State private var showTrust = false
 
     // 定时器与远程控制注册
     @State private var heartbeatTimer: Timer?
-    @State private var loadingTimeoutTimer: Timer?
     @State private var autoNextTimer: Timer?
     @State private var remoteRegistrations: [RemoteRegistration] = []
+    /// 装载任务。切换播放源时取消上一个，避免两路 load 互相覆盖状态。
+    @State private var loadTask: Task<Void, Never>?
 
     public init(
         playInfo: PlayResponse,
@@ -72,7 +74,22 @@ public struct PlayerView: View {
     }
 
     private var isInitialLoading: Bool {
-        !playerController.isReady && playerController.errorMessage == nil
+        switch playerController.phase {
+        case .resolving, .pinning, .connecting, .buffering:
+            return true
+        case .idle, .ready, .failed:
+            return false
+        }
+    }
+
+    /// 播放失败的原始原因。由引擎的 `phase` 单一来源提供，不再另设标志位。
+    private var failureReason: String? {
+        if case .failed(let reason) = playerController.phase { return reason }
+        return nil
+    }
+
+    private var playbackRequest: PlaybackRequest? {
+        PlaybackRequest(playInfo: playInfo)
     }
 
     // MARK: - Body
@@ -86,7 +103,6 @@ public struct PlayerView: View {
                     VideoSurfaceView(
                         controller: playerController,
                         url: videoUrl,
-                        headers: playInfo.safeHeaders,
                         resumeMs: playInfo.resumeMs
                     )
                 }
@@ -169,11 +185,11 @@ public struct PlayerView: View {
                     )
                 }
 
-                // 9. 播放错误
-                if let message = playerController.errorMessage {
+                // 9. 播放错误：展示引擎给出的原始失败原因
+                if let message = failureReason {
                     PlayerErrorOverlay(
                         message: message,
-                        onRetry: restartPlayback,
+                        onRetry: retryLoad,
                         onClose: handleClose
                     )
                 }
@@ -195,32 +211,17 @@ public struct PlayerView: View {
         }
         .onReceive(playerController.$isReady.removeDuplicates()) { ready in
             if ready {
-                showTimeoutAlert = false
                 setupRemoteCommands()
-            }
-        }
-        .onReceive(playerController.$errorMessage.removeDuplicates()) { message in
-            if message != nil {
-                showTimeoutAlert = false
             }
         }
         .onReceive(playerController.$isPlaying.removeDuplicates()) { _ in
             ui.playbackStateChanged()
         }
-        .alert("连接提示", isPresented: $showTimeoutAlert) {
-            Button("重试连接") { restartPlayback() }
-            Button("复制直链") {
-                UIPasteboard.general.string = playInfo.playUrl
-                ui.showToast("直链已复制到剪贴板")
-            }
-            Button("用外部播放器打开") { openExternalPlayer() }
-            Button("查看诊断日志") { showDiagnostics = true }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("连接网盘超时，可能因防盗链拦截或网络阻塞。您可以重试、复制直链，或查看诊断日志。")
-        }
         .sheet(isPresented: $showDiagnostics) {
             PlayerDiagnosticsView()
+        }
+        .sheet(isPresented: $showTrust) {
+            TrustManagementView()
         }
     }
 
@@ -358,8 +359,9 @@ public struct PlayerView: View {
                     ui.closeDrawer(animated: false)
                     showDiagnostics = true
                 },
-                onCycleTransport: {
-                    cycleTransportAndRestart()
+                onShowTrust: {
+                    ui.closeDrawer(animated: false)
+                    showTrust = true
                 }
             )
         }
@@ -437,20 +439,18 @@ public struct PlayerView: View {
 
         playerController.onPlaybackEnded = { handleVideoFinished() }
 
-        if let videoUrl = URL(string: playInfo.playUrl) {
-            playerController.setup(
-                url: videoUrl,
-                headers: playInfo.safeHeaders,
-                resumeMs: playInfo.resumeMs,
-                cacheLimitMb: playInfo.safeCacheLimitMb
-            )
-        } else {
-            playerController.errorMessage = "无效的播放地址"
+        guard let request = playbackRequest else {
+            playerController.reportUnplayableSource("服务端返回的播放地址无效")
+            return
+        }
+
+        loadTask?.cancel()
+        loadTask = Task { @MainActor in
+            await playerController.load(request)
         }
 
         startHeartbeat()
         ui.showControls()
-        startLoadingTimeoutTimer()
     }
 
     private func configureAudioSession() {
@@ -537,17 +537,6 @@ public struct PlayerView: View {
         remoteRegistrations.removeAll()
     }
 
-    private func startLoadingTimeoutTimer() {
-        loadingTimeoutTimer?.invalidate()
-        loadingTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: false) { _ in
-            Task { @MainActor in
-                guard !self.playerController.isReady, self.playerController.errorMessage == nil else { return }
-                D.log("view", "15 秒看门狗触发：仍未 ready。播放中=\(self.playerController.isPlaying) 位置=\(self.playerController.currentPositionMs) 时长=\(self.playerController.durationMs) 已缓冲=\(self.playerController.bufferedPositionMs)")
-                self.showTimeoutAlert = true
-            }
-        }
-    }
-
     private func startHeartbeat() {
         heartbeatTimer?.invalidate()
         let interval = max(1.0, Double(playInfo.safeProgressIntervalMs) / 1000.0)
@@ -615,30 +604,22 @@ public struct PlayerView: View {
 
     // MARK: - 错误与外部工具
 
-    /// 循环切换播放通道并立即重新起播，方便对比直连与代理的吞吐差异。
-    private func cycleTransportAndRestart() {
-        let all = PlaybackTransport.allCases
-        guard let index = all.firstIndex(of: PlaybackTransport.current) else { return }
-        let next = all[(index + 1) % all.count]
-        PlaybackTransport.current = next
-        ui.closeDrawer(animated: false)
-        ui.showToast("播放通道：\(next.displayName)")
-        restartPlayback()
-    }
-
-    private func restartPlayback() {
-        showTimeoutAlert = false
-        guard let videoUrl = URL(string: playInfo.playUrl) else {
-            playerController.errorMessage = "无效的播放地址"
+    /// 用户主动重试。只在用户点击时触发，不存在自动重试或通道切换。
+    private func retryLoad() {
+        guard let url = URL(string: playInfo.playUrl) else {
+            playerController.reportUnplayableSource("服务端返回的播放地址无效")
             return
         }
-        playerController.setup(
-            url: videoUrl,
+        let request = PlaybackRequest(
+            url: url,
             headers: playInfo.safeHeaders,
             resumeMs: playerController.currentPositionMs,
             cacheLimitMb: playInfo.safeCacheLimitMb
         )
-        startLoadingTimeoutTimer()
+        loadTask?.cancel()
+        loadTask = Task { @MainActor in
+            await playerController.load(request)
+        }
     }
 
     private func openExternalPlayer() {
@@ -674,10 +655,10 @@ public struct PlayerView: View {
 
     private func cleanup() {
         D.log("view", "cleanup → 销毁播放会话")
+        loadTask?.cancel()
+        loadTask = nil
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
-        loadingTimeoutTimer?.invalidate()
-        loadingTimeoutTimer = nil
         autoNextTimer?.invalidate()
         autoNextTimer = nil
         subtitleLoadTask?.cancel()
