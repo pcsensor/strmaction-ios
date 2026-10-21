@@ -44,9 +44,6 @@ public final class VideoPlayerController: ObservableObject {
     private weak var boundPiPLayer: KSPlayerLayer?
 
     private var connectTimeoutTask: Task<Void, Never>?
-    /// 证书问题的可操作提示。失败时附加到 FFmpeg 的原始错误后面，
-    /// 避免只看到一个无从下手的 "avformat can't open input"。
-    private var trustHint: String?
     /// 诊断节流：上次记录过的播放秒数。
     private var lastDiagnosticSecond: Int64 = -1
 
@@ -70,18 +67,17 @@ public final class VideoPlayerController: ObservableObject {
         resetState()
         phase = .resolving
 
-        // 1. 证书固定（仅 https）
-        trustHint = nil
+        // 1. 证书信任校验（仅 https）
+        //
+        //    这里刻意提前失败：链校验不过就直接给出原因，
+        //    而不是把问题丢给 FFmpeg，让它在 100ms 后吐一句
+        //    "avformat can't open input"。
         if request.url.scheme?.lowercased() == "https" {
             let host = request.url.host ?? ""
             let hostKey = TLSTrustStore.hostKey(host: host, port: request.url.port)
             phase = .pinning(hostKey: hostKey)
             do {
-                let pin = try await SecurityPolicy.ensurePinned(for: request.url)
-                if let pin, pin.chainUsable == false {
-                    trustHint = "服务器证书未绑定该地址（缺少 subjectAltName），"
-                        + "无法进行证书链校验。请为证书添加 SAN=IP:\(host) 或改用域名后重新连接。"
-                }
+                try await SecurityPolicy.ensureTrusted(for: request.url)
             } catch {
                 fail(error.localizedDescription)
                 return
@@ -342,16 +338,12 @@ public final class VideoPlayerController: ObservableObject {
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
 
-        // 若已知是证书绑定不了地址，把可操作提示接在原始错误后面。
-        var message = reason
-        if let trustHint, !reason.contains("subjectAltName") {
-            message = reason + "\n\n" + trustHint
-        }
-
-        D.log("engine", "失败: \(message)")
-        errorMessage = message
+        // 失败原因一律用底层原文，不加工、不降级。
+        // 证书类问题在进入引擎之前就已经给出可操作的说明，这里不再追加提示。
+        D.log("engine", "失败: \(reason)")
+        errorMessage = reason
         isPlaying = false
-        phase = .failed(message)
+        phase = .failed(reason)
     }
 
     /// 连接阶段超时。只在 `.connecting` 阶段计时；一旦有数据在动就取消，
@@ -371,7 +363,6 @@ public final class VideoPlayerController: ObservableObject {
     private func resetState() {
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
-        trustHint = nil
         isPlaying = false
         currentPositionMs = 0
         durationMs = 0

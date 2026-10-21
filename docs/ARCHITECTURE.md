@@ -87,10 +87,11 @@ StrmAction 是一个面向 `.strm` 媒体库的「刮削 + 展示 + 播放分发
 * 保存以下配置至 `UserDefaults`：
   * `server_url`：服务器完整地址（标准化去除结尾 `/`）。
   * `cache_limit_mb`：本地播放缓存限制（默认 128MB）。
-  * `tls_pinned_certificates`：已固定的服务器证书指纹（由 `TLSTrustStore` 维护）。
+  * `tls_trusted_anchors_v1`：用户导入的自签名根证书（由 `TLSTrustStore` 维护）。
 
-> 自签名不再有全局开关。信任以「每主机证书指纹固定」的方式表达，
-> 可在 SetupView 的「证书信任」入口查看与撤销。
+> 自签名不再有全局开关，也不再按主机固定叶子证书。
+> 信任以「导入私有 CA 的自签名根证书」表达，
+> 可在 SetupView 的「证书信任」入口导入与移除。
 
 ### 4.1.1 信任层（Trust）
 
@@ -98,17 +99,27 @@ StrmAction 是一个面向 `.strm` 媒体库的「刮削 + 展示 + 播放分发
 
 | 模块 | 职责 |
 |---|---|
-| `TLSTrustStore` | 每主机 SHA-256 指纹固定、持久化；生成 FFmpeg 用的 CA bundle |
-| `TLSProbe` | `NWConnection` 完成一次 TLS 握手，捕获证书链（TOFU 数据来源） |
-| `SecurityPolicy` | 唯一信任判定，URLSession 委托与探针共用同一份数据 |
+| `TLSTrustStore` | 保存用户导入的自签名根证书、持久化；生成 FFmpeg 用的 CA bundle |
+| `TLSProbe` | `NWConnection` 完成一次 TLS 握手，捕获证书链 |
+| `SecurityPolicy` | 唯一信任判定，URLSession 委托与媒体通道共用同一份数据 |
 
-判定顺序固定为三条：已有固定 → 只认该指纹；无固定但可由公共根验证 → 交给系统；
-无固定且不可公共验证 → 首次使用即固定（TOFU）。
+判定顺序固定为两条：可由公共根验证 → 交给系统；
+否则必须落到已导入的自签名根上，且主机名匹配。
+
+**为什么不固定叶子证书**：Caddy 内部 CA 签发的叶子证书有效期只有 12 小时，
+固定它的指纹等于每半天失效一次；轮换过程中不变的是签发它的 CA。
+同时 FFmpeg 的 TLS 后端没有开启 `X509_V_FLAG_PARTIAL_CHAIN`，
+信任锚必须是**自签名根**——中间证书放进 `ca_file` 照样报
+`unable to get issuer certificate`，叶子证书更不行。
 
 媒体字节**只走 FFmpeg 自己的 HTTP/TLS 栈**，不经过任何中间进程：
 `MediaTransport` 把原始 URL、服务端下发的请求头、以及
-`ca_file`（公共根 ＋ 固定证书）组装成 `KSOptions` 交给播放器。
+`ca_file`（公共根 ＋ 已导入根证书）组装成 `KSOptions` 交给播放器。
 `URLSession` 仅用于 KB 级 API（play 接口、字幕、进度上报）。
+
+播放前 `SecurityPolicy.ensureTrusted(for:)` 先用同一套锚点做一次严格评估
+（`SecTrustSetAnchorCertificatesOnly(true)`，与 `ca_file` 替换默认信任库的行为一致），
+不通过就当场报错并给出导入提示，不把问题丢给 FFmpeg。
 
 ### 4.2 MainWebViewController（网页容器）
 * 承载完整的 Web 端业务体验。

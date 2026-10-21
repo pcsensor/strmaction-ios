@@ -15,9 +15,10 @@ struct TLSCapture {
     let notAfter: Date?
     /// 该链能否被系统公共根验证通过。
     let isPubliclyTrusted: Bool
-    /// 以叶子证书为锚点、按 SSL 策略（含主机名）能否校验通过。
-    /// 等价于预判 FFmpeg 侧 `tls_verify=1 + ca_file` 的结果。
-    let chainUsable: Bool
+    /// 链上最高一级证书的主体，用于「请导入这个 CA 的根证书」这类提示。
+    ///
+    /// 服务器按惯例不发送自签名根，所以这里通常拿到的是中间证书的名字。
+    let issuerName: String
 
     var fingerprint: String {
         CertificateTools.sha256Fingerprint(of: leafDER)
@@ -54,8 +55,8 @@ enum TLSProbeError: LocalizedError {
 
 /// 用 `NWConnection` 对目标主机做一次 TLS 握手，取回证书链。
 ///
-/// 这是证书固定（TOFU）的数据来源。校验由 `SecurityPolicy` 统一决策，
-/// 探针本身只负责「拿到证书」，不做信任判断。
+/// 这是信任判定的数据来源（握一次手，看看对方拿出了哪些证书）。
+/// 校验由 `SecurityPolicy` 统一决策，探针本身只负责「拿到证书」，不做信任判断。
 enum TLSProbe {
     static func capture(host: String, port: UInt16, timeout: TimeInterval = 10) async throws -> TLSCapture {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
@@ -128,7 +129,8 @@ enum TLSProbe {
             guard let leaf = chain.first else {
                 throw TLSProbeError.noCertificate(hostKey)
             }
-            let chainUsable = CertificateTools.validatesAsAnchor(chain: chain, host: host)
+            // 链上第二张就是叶子的签发者；只有一张时它本身是自签名的。
+            let issuerName = CertificateTools.subject(of: chain.count > 1 ? chain[1] : leaf)
             let capture = TLSCapture(
                 hostKey: hostKey,
                 leafDER: CertificateTools.der(from: leaf),
@@ -136,13 +138,13 @@ enum TLSProbe {
                 subject: CertificateTools.subject(of: leaf),
                 notAfter: CertificateTools.notAfter(of: leaf),
                 isPubliclyTrusted: CertificateTools.isPubliclyTrusted(trust),
-                chainUsable: chainUsable
+                issuerName: issuerName
             )
 
-            D.log("probe", "探测成功 \(hostKey) 公共CA=\(capture.isPubliclyTrusted) 可链校验=\(chainUsable) 主体=\(capture.subject)")
-            if !capture.isPubliclyTrusted && !chainUsable {
-                D.log("probe", "警告：证书无法作为锚点通过主机名校验，FFmpeg 会拒绝连接。"
-                    + "通常是证书缺少 SAN（应包含 IP:\(host) 或对应域名）。")
+            D.log("probe", "探测成功 \(hostKey) 公共CA=\(capture.isPubliclyTrusted) "
+                + "链长=\(chain.count) 颁发者=\(issuerName) 主体=\(capture.subject)")
+            if !capture.isPubliclyTrusted {
+                D.log("probe", "私有 CA：链能否成立取决于是否已导入对应根证书，由 SecurityPolicy 判定")
             }
             return capture
         }

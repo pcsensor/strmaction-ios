@@ -290,8 +290,8 @@ struct PlayerDrawerContent: View {
     private let longPressSpeeds: [Double] = [1.5, 2.0, 2.5, 3.0]
 
     private var trustSubtitle: String {
-        if trustStore.pins.isEmpty { return "尚未固定任何服务器" }
-        return "已固定 \(trustStore.pins.count) 个服务器"
+        if trustStore.anchors.isEmpty { return "尚未导入任何根证书" }
+        return "已信任 \(trustStore.anchors.count) 个根证书"
     }
 
     var body: some View {

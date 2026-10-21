@@ -20,7 +20,12 @@ enum MediaTransport {
 
         // 2. TLS：真实的链校验，不是关闭校验。
         //    ca_file 会替换 FFmpeg 的默认信任库，因此 bundle 内同时包含
-        //    公共根证书与已固定的自签名证书，覆盖「源站 → 302 → CDN」两跳。
+        //    公共根证书与用户导入的自签名根证书，覆盖「源站 → 302 → CDN」两跳。
+        //
+        //    这里放的是**根**，不是叶子：
+        //    openssl 会顺着「叶子 → 中间 → 根」往上构建链，链顶端必须落在信任库里。
+        //    中间证书当不了锚（FFmpeg 没开 X509_V_FLAG_PARTIAL_CHAIN），
+        //    叶子证书更不行（它既不是 CA，还可能每 12 小时轮换一次）。
         //
         //    这里只放 TLS 必需的两项，其余一律不再注入：
         //    - 不设 verifyhost：它是 AV_OPT_TYPE_STRING（期望主机名），
@@ -58,6 +63,7 @@ enum MediaTransport {
         let bundleSize = (bundleAttrs?[.size] as? NSNumber)?.intValue ?? 0
         D.log("transport", "options ca_file=\(caBundlePath.split(separator: "/").last ?? "-") "
             + "存在=\(FileManager.default.fileExists(atPath: caBundlePath)) 大小=\(bundleSize) "
+            + "受信任根=\(TLSTrustStore.shared.snapshot().count) "
             + "cache=\(options.cache) maxBuffer=\(options.maxBufferDuration)s "
             + "probesize=1MB 请求头=\(request.headers.keys.sorted().joined(separator: ","))")
 

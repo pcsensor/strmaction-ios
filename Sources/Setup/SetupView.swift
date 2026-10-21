@@ -169,12 +169,12 @@ public struct SetupView: View {
         }
     }
 
-    /// 证书信任摘要，展示当前已固定的服务器数量。
+    /// 证书信任摘要，展示当前已导入的根证书数量。
     private var trustSummary: String {
-        if trustStore.pins.isEmpty {
-            return "首次连接自签名服务时自动固定证书指纹"
+        if trustStore.anchors.isEmpty {
+            return "私有 CA 站点需导入其自签名根证书"
         }
-        return "已固定 \(trustStore.pins.count) 个服务器 · 点击查看指纹"
+        return "已信任 \(trustStore.anchors.count) 个根证书 · 点击管理"
     }
 
     private func testConnection() {

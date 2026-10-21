@@ -1,31 +1,27 @@
 import Foundation
 import Security
-import CryptoKit
 
-// MARK: - 固定证书
+// MARK: - 受信任根证书
 
-/// 一条已固定的服务器证书。
+/// 一条用户显式导入的信任锚。
 ///
-/// 固定的对象是**叶子证书的 SHA-256 指纹**，而不是「是否信任」这个布尔值。
-/// 指纹不符即握手失败，不做静默降级。
-struct PinnedCertificate: Codable, Identifiable, Equatable {
-    /// 形如 `211.101.246.235:15244`；443 端口省略，避免同一主机出现两条记录。
-    let hostKey: String
-    /// 大写、冒号分隔的 SHA-256，例如 `A1:B2:…`
+/// 关键约束：**必须是自签名证书**。
+/// FFmpeg 的 TLS 后端没有开启 `X509_V_FLAG_PARTIAL_CHAIN`，
+/// 中间证书当不了信任锚，放进去照样报 `unable to get issuer certificate`。
+///
+/// 之所以不再固定「叶子证书」：Caddy 内部 CA 签发的叶子证书有效期只有 12 小时，
+/// 固定它的指纹等于装了一个每半天响一次的闹钟。证书轮换时 CA 不变，
+/// 所以信任对象应该是 CA。
+struct TrustedCA: Codable, Identifiable, Equatable {
+    /// 大写、冒号分隔的 SHA-256，同时作为唯一标识。
     let fingerprint: String
-    /// 叶子证书 PEM，用于拼进 FFmpeg 的 CA bundle。
-    let pem: String
     /// 证书主体摘要，仅用于 UI 展示。
     let subject: String
-    let notAfter: Date?
-    let pinnedAt: Date
-    /// 该证书能否作为锚点通过「链 + 主机名」校验。
-    ///
-    /// 为 false 说明证书没有绑定当前地址（缺 subjectAltName），
-    /// 此时 FFmpeg 的 `tls_verify=1` 必然失败。用可选类型保持对旧记录的兼容。
-    var chainUsable: Bool?
+    /// 证书 PEM，用于拼进 FFmpeg 的 CA bundle。
+    let pem: String
+    let addedAt: Date
 
-    var id: String { hostKey }
+    var id: String { fingerprint }
 
     /// 供 UI 展示的短指纹。
     var shortFingerprint: String {
@@ -33,29 +29,49 @@ struct PinnedCertificate: Codable, Identifiable, Equatable {
     }
 }
 
+// MARK: - 导入错误
+
+enum TrustAnchorError: LocalizedError {
+    case noCertificate
+    case noSelfSignedCertificate(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noCertificate:
+            return "没有解析到任何证书，请确认内容是 PEM 格式（-----BEGIN CERTIFICATE-----）。"
+        case .noSelfSignedCertificate(let detail):
+            return "\(detail)\n\n里面没有自签名证书。FFmpeg 只认自签名的根证书，"
+                + "中间证书放进信任库依然会报 unable to get issuer certificate。请改导根证书。"
+        }
+    }
+}
+
 // MARK: - 信任库
 
-/// 证书固定库：持久化每个主机的固定证书，并生成 FFmpeg 使用的 CA bundle。
+/// 证书信任库：保存用户导入的自签名根证书，并生成 FFmpeg 使用的 CA bundle。
 ///
-/// 这是整个自签名方案**唯一**的信任来源：API 通道（URLSession 委托）与
+/// 这是整个私有 CA 方案**唯一**的信任来源：API 通道（URLSession 委托）与
 /// 媒体通道（FFmpeg 的 `ca_file`）都从这里取同一份数据，不存在第二套策略。
 ///
 /// 线程模型：内部状态由 `lock` 保护，任意线程可同步读取（`snapshot()`）；
-/// `pins` 这个 `@Published` 仅在主线程更新，供 SwiftUI 观察。
+/// `anchors` 这个 `@Published` 仅在主线程更新，供 SwiftUI 观察。
 final class TLSTrustStore: ObservableObject {
     static let shared = TLSTrustStore()
 
     /// 供 SwiftUI 观察的镜像，只在主线程写入。
-    @Published private(set) var pins: [PinnedCertificate] = []
+    @Published private(set) var anchors: [TrustedCA] = []
 
     private let lock = NSLock()
-    private var storage: [PinnedCertificate] = []
+    private var storage: [TrustedCA] = []
 
-    private let defaultsKey = "tls_pinned_certificates"
+    private let defaultsKey = "tls_trusted_anchors_v1"
+    /// 旧版按主机固定叶子证书的键。语义已废弃，仅用于一次性清理。
+    private let legacyKey = "tls_pinned_certificates"
     private let bundleFileName = "ca-bundle.pem"
     private var cachedBundlePath: String?
 
     private init() {
+        dropLegacyPins()
         load()
     }
 
@@ -69,52 +85,102 @@ final class TLSTrustStore: ObservableObject {
     }
 
     /// 线程安全的快照，任意线程可调用。
-    func snapshot() -> [PinnedCertificate] {
+    func snapshot() -> [TrustedCA] {
         lock.lock()
         defer { lock.unlock() }
         return storage
     }
 
-    func pin(forHostKey key: String) -> PinnedCertificate? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storage.first { $0.hostKey == key }
-    }
+    var isEmpty: Bool { snapshot().isEmpty }
 
-    func pin(host: String, port: Int?) -> PinnedCertificate? {
-        pin(forHostKey: Self.hostKey(host: host, port: port))
+    /// 把已导入的根证书还原成 `SecCertificate`，供 `SecTrust` 作为锚点使用。
+    func anchorCertificates() -> [SecCertificate] {
+        snapshot().compactMap { CertificateTools.certificates(fromPEM: $0.pem).first }
     }
 
     // MARK: 写入
 
-    func store(_ certificate: PinnedCertificate) {
+    /// 导入 PEM 文本，返回成功导入的自签名根证书。
+    ///
+    /// 允许一次导入 CA bundle（多张证书）：其中非自签名的中间证书会被跳过，
+    /// 因为它们在 FFmpeg 侧起不到信任锚的作用。
+    @discardableResult
+    func addAnchor(pem: String) throws -> [TrustedCA] {
+        let certificates = CertificateTools.certificates(fromPEM: pem)
+        guard !certificates.isEmpty else {
+            throw TrustAnchorError.noCertificate
+        }
+
+        var imported: [TrustedCA] = []
+        var skipped: [String] = []
+        var duplicated = 0
+
+        for certificate in certificates {
+            guard CertificateTools.isSelfSigned(certificate) else {
+                skipped.append(CertificateTools.subject(of: certificate))
+                continue
+            }
+            let der = CertificateTools.der(from: certificate)
+            let fingerprint = CertificateTools.sha256Fingerprint(of: der)
+            lock.lock()
+            let exists = storage.contains { $0.fingerprint == fingerprint }
+            lock.unlock()
+            if exists {
+                duplicated += 1
+                continue
+            }
+            imported.append(
+                TrustedCA(
+                    fingerprint: fingerprint,
+                    subject: CertificateTools.subject(of: certificate),
+                    pem: CertificateTools.pem(from: der),
+                    addedAt: Date()
+                )
+            )
+        }
+
+        guard !imported.isEmpty else {
+            let detail = skipped.isEmpty
+                ? "这 \(duplicated) 张证书此前已经导入过。"
+                : "已跳过的中间证书：\(skipped.joined(separator: "、"))"
+            throw TrustAnchorError.noSelfSignedCertificate(detail)
+        }
+
         lock.lock()
-        storage.removeAll { $0.hostKey == certificate.hostKey }
-        storage.append(certificate)
-        storage.sort { $0.hostKey < $1.hostKey }
+        for anchor in imported where !storage.contains(where: { $0.fingerprint == anchor.fingerprint }) {
+            storage.append(anchor)
+        }
+        storage.sort { $0.subject < $1.subject }
         let snapshot = storage
         lock.unlock()
 
         persist(snapshot)
         invalidateBundle()
         publishOnMain(snapshot)
-        D.log("trust", "已固定 \(certificate.hostKey) 指纹=\(certificate.shortFingerprint)…")
+
+        for anchor in imported {
+            D.log("trust", "已信任根证书 \(anchor.subject) 指纹=\(anchor.shortFingerprint)…")
+        }
+        if !skipped.isEmpty {
+            D.log("trust", "导入时跳过非自签名证书 \(skipped.count) 张（中间证书不能当信任锚）")
+        }
+        return imported
     }
 
-    func remove(hostKey: String) {
+    func removeAnchor(fingerprint: String) {
         lock.lock()
-        guard storage.contains(where: { $0.hostKey == hostKey }) else {
+        guard let index = storage.firstIndex(where: { $0.fingerprint == fingerprint }) else {
             lock.unlock()
             return
         }
-        storage.removeAll { $0.hostKey == hostKey }
+        let removed = storage.remove(at: index)
         let snapshot = storage
         lock.unlock()
 
         persist(snapshot)
         invalidateBundle()
         publishOnMain(snapshot)
-        D.log("trust", "已撤销固定 \(hostKey)")
+        D.log("trust", "已移除根证书 \(removed.subject) 指纹=\(removed.shortFingerprint)…")
     }
 
     func removeAll() {
@@ -125,7 +191,7 @@ final class TLSTrustStore: ObservableObject {
         persist([])
         invalidateBundle()
         publishOnMain([])
-        D.log("trust", "已清空全部固定证书")
+        D.log("trust", "已清空全部受信任根证书")
     }
 
     // MARK: FFmpeg 用的 CA bundle
@@ -145,14 +211,17 @@ final class TLSTrustStore: ObservableObject {
         lock.unlock()
     }
 
-    /// 生成（或复用）CA bundle，内容 = 公共根证书 + 全部固定证书。
+    /// 生成（或复用）CA bundle，内容 = 公共根证书 + 全部受信任根证书。
     ///
     /// FFmpeg 一旦设置 `ca_file` 就不再加载系统默认信任库，
-    /// 因此公共根必须一并写进去，否则 302 跳转到公共 CA 的 CDN 会校验失败。
+    /// 因此公共根必须一并写进去，否则跳转到公共 CA 的 CDN 会校验失败。
+    ///
+    /// 这里放的是**根证书**而不是叶子证书：openssl 会顺着
+    /// 叶子 → 中间 → 根 往上构建链，只有链顶端落在信任库里才算通过。
     func caBundlePath() throws -> String {
         lock.lock()
         let cached = cachedBundlePath
-        let currentPins = storage
+        let currentAnchors = storage
         lock.unlock()
 
         if let cached, FileManager.default.fileExists(atPath: cached) {
@@ -163,9 +232,9 @@ final class TLSTrustStore: ObservableObject {
         }
 
         var contents = try publicRootsPEM()
-        for pin in currentPins {
-            contents += "\n# pinned: \(pin.hostKey)\n"
-            contents += pin.pem.hasSuffix("\n") ? pin.pem : pin.pem + "\n"
+        for anchor in currentAnchors {
+            contents += "\n# trusted CA: \(anchor.subject)\n"
+            contents += anchor.pem.hasSuffix("\n") ? anchor.pem : anchor.pem + "\n"
         }
 
         try FileManager.default.createDirectory(
@@ -178,7 +247,7 @@ final class TLSTrustStore: ObservableObject {
         lock.lock()
         cachedBundlePath = path
         lock.unlock()
-        D.log("trust", "CA bundle 就绪 固定证书=\(currentPins.count) 路径=\(path)")
+        D.log("trust", "CA bundle 就绪 受信任根证书=\(currentAnchors.count) 路径=\(path)")
         return path
     }
 
@@ -199,35 +268,43 @@ final class TLSTrustStore: ObservableObject {
 
     // MARK: 持久化
 
-    private func publishOnMain(_ value: [PinnedCertificate]) {
+    private func publishOnMain(_ value: [TrustedCA]) {
         if Thread.isMainThread {
-            pins = value
+            anchors = value
         } else {
             DispatchQueue.main.async { [weak self] in
-                self?.pins = value
+                self?.anchors = value
             }
         }
     }
 
     private func load() {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey),
-              let decoded = try? JSONDecoder().decode([PinnedCertificate].self, from: data)
+              let decoded = try? JSONDecoder().decode([TrustedCA].self, from: data)
         else {
             lock.lock()
             storage = []
             lock.unlock()
             return
         }
-        let sorted = decoded.sorted { $0.hostKey < $1.hostKey }
+        let sorted = decoded.sorted { $0.subject < $1.subject }
         lock.lock()
         storage = sorted
         lock.unlock()
         publishOnMain(sorted)
     }
 
-    private func persist(_ value: [PinnedCertificate]) {
+    private func persist(_ value: [TrustedCA]) {
         guard let data = try? JSONEncoder().encode(value) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
+    }
+
+    /// 旧版按主机固定叶子证书。叶子证书会周期性轮换，那套数据留着只会误事。
+    private func dropLegacyPins() {
+        guard UserDefaults.standard.data(forKey: legacyKey) != nil else { return }
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+        D.log("trust", "已清除旧版叶子证书固定记录（叶子证书会轮换），"
+            + "请改为导入站点的自签名根证书。")
     }
 }
 
@@ -235,84 +312,33 @@ final class TLSTrustStore: ObservableObject {
 
 enum TrustError: LocalizedError {
     case bundleUnavailable(String)
-    case fingerprintMismatch(hostKey: String, expected: String, actual: String)
+    /// 证书链无法落到任何一个已导入的自签名根上。
+    case anchorMissing(hostKey: String, issuer: String)
+    /// 链本身成立，但证书没有绑定当前访问的地址。
+    case hostnameMismatch(hostKey: String)
+    /// 链断裂或签名无效。
+    case chainInvalid(hostKey: String, detail: String)
     case noCertificate(hostKey: String)
 
     var errorDescription: String? {
         switch self {
         case .bundleUnavailable(let detail):
             return "证书信任库不可用：\(detail)"
-        case .fingerprintMismatch(let hostKey, let expected, let actual):
-            return "\(hostKey) 的证书指纹与固定值不符（固定 \(expected)，实际 \(actual)）"
+        case .anchorMissing(let hostKey, let issuer):
+            return "\(hostKey) 的证书由私有 CA 签发（链上最高一级：\(issuer)），"
+                + "但还没有导入它的自签名根证书。\n\n"
+                + "在服务器上取根证书（任选一条）：\n"
+                + "· curl -s http://127.0.0.1:2019/pki/ca/local\n"
+                + "· Caddy 数据目录下的 pki/authorities/local/root.crt\n"
+                + "然后在「设置 → 证书信任」里导入。\n\n"
+                + "注意：必须是自签名的根证书。FFmpeg 不认中间证书当信任锚，"
+        case .hostnameMismatch(let hostKey):
+            return "\(hostKey) 的证书没有绑定这个地址（缺少对应的 subjectAltName）。"
+                + "请为证书添加 SAN=IP 或改用域名后重新连接。"
+        case .chainInvalid(let hostKey, let detail):
+            return "\(hostKey) 的证书链校验失败：\(detail)"
         case .noCertificate(let hostKey):
             return "\(hostKey) 未返回任何证书"
         }
-    }
-}
-
-// MARK: - 证书工具
-
-enum CertificateTools {
-    static func sha256Fingerprint(of der: Data) -> String {
-        let digest = SHA256.hash(data: der)
-        return digest.map { String(format: "%02X", $0) }.joined(separator: ":")
-    }
-
-    static func pem(from der: Data) -> String {
-        let base64 = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
-        return "-----BEGIN CERTIFICATE-----\n\(base64)\n-----END CERTIFICATE-----\n"
-    }
-
-    static func der(from certificate: SecCertificate) -> Data {
-        SecCertificateCopyData(certificate) as Data
-    }
-
-    /// 取证书链（叶子在前）。iOS 15+ 用 `SecTrustCopyCertificateChain`。
-    static func chain(from trust: SecTrust) -> [SecCertificate] {
-        if let array = SecTrustCopyCertificateChain(trust) as? [SecCertificate], !array.isEmpty {
-            return array
-        }
-        let count = SecTrustGetCertificateCount(trust)
-        guard count > 0 else { return [] }
-        return (0..<count).compactMap { SecTrustGetCertificateAtIndex(trust, $0) }
-    }
-
-    static func subject(of certificate: SecCertificate) -> String {
-        (SecCertificateCopySubjectSummary(certificate) as String?) ?? "未知主体"
-    }
-
-    /// 证书到期时间。
-    ///
-    /// iOS 没有公开 API 读取单张证书的有效期字段：
-    /// `SecCertificateCopyValues` 与 `kSecOIDX509V1ValidityNotAfter` 只在 macOS 提供。
-    /// 这里返回 nil，UI 会自动隐藏该项；指纹固定本身不依赖有效期。
-    static func notAfter(of certificate: SecCertificate) -> Date? {
-        nil
-    }
-
-    /// 该链能否被系统公共根验证通过。
-    /// 通过 → 公共 CA 签发，无需固定；失败 → 自签名或私有 CA，需要固定。
-    static func isPubliclyTrusted(_ trust: SecTrust) -> Bool {
-        var error: CFError?
-        return SecTrustEvaluateWithError(trust, &error)
-    }
-
-    /// 以链上的叶子证书为唯一锚点，按 SSL 策略（含主机名）重新评估一次。
-    ///
-    /// 这正好模拟 FFmpeg 侧 `tls_verify=1` + `ca_file=<该证书>` 时的判定：
-    /// 返回 false 说明即使证书文件正确，FFmpeg 仍会因主机名不匹配而握手失败。
-    static func validatesAsAnchor(chain: [SecCertificate], host: String) -> Bool {
-        guard let leaf = chain.first else { return false }
-        var trust: SecTrust?
-        let status = SecTrustCreateWithCertificates(
-            chain as CFArray,
-            SecPolicyCreateSSL(true, host as CFString),
-            &trust
-        )
-        guard status == errSecSuccess, let trust else { return false }
-        SecTrustSetAnchorCertificates(trust, [leaf] as CFArray)
-        SecTrustSetAnchorCertificatesOnly(trust, true)
-        var error: CFError?
-        return SecTrustEvaluateWithError(trust, &error)
     }
 }
