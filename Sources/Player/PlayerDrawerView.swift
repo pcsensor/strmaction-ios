@@ -284,7 +284,9 @@ struct PlayerDrawerContent: View {
     // 导致跨文件的 PlayerDrawerContent(...) 调用无法访问。
     @ObservedObject var trustStore = TLSTrustStore.shared
 
-    private var speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+    // 必须是 let：带默认值的 private var 会被纳入合成构造器并使其降级为 private，
+    // 而带默认值的 private let 会被整个排除，不影响构造器访问级别。
+    private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
     private let longPressSpeeds: [Double] = [1.5, 2.0, 2.5, 3.0]
 
     private var trustSubtitle: String {
