@@ -7,6 +7,36 @@ import Darwin
 import KSPlayer
 #endif
 
+/// 播放通道。
+///
+/// 背景：回环代理最初是为 KSAVPlayer / AVFoundation 加的（它没有公开的证书信任回调）。
+/// 但 KSMEPlayer（FFmpeg）本身支持 `tls_verify=0`，可以直连自签名 HTTPS。
+/// 而实测发现经代理时上游吞吐只有 ~50 KB/s（代理转发本身没问题，收=发、pending=0），
+/// 瓶颈在 URLSession 这条 HTTP 栈上，导致 4.9GB 的片子连 moov 都读不完。
+public enum PlaybackTransport: String, CaseIterable {
+    /// 直连优先，出错自动回退到回环代理（默认）
+    case auto
+    /// 始终直连，不回退
+    case direct
+    /// 始终走回环代理
+    case proxy
+
+    public var displayName: String {
+        switch self {
+        case .auto: return "自动（直连优先）"
+        case .direct: return "直连"
+        case .proxy: return "回环代理"
+        }
+    }
+
+    static let defaultsKey = "playback_transport"
+
+    public static var current: PlaybackTransport {
+        get { PlaybackTransport(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .auto }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
+    }
+}
+
 /// 播放器统一协议与控制器
 @MainActor
 public final class VideoPlayerController: ObservableObject {
@@ -31,6 +61,18 @@ public final class VideoPlayerController: ObservableObject {
     /// 诊断日志节流用：上一次记录过的播放秒数。
     private var lastDiagnosticPlaySecond: Int64 = -1
 
+    // 通道回退所需的上次 setup 参数
+    private var lastSetupURL: URL?
+    private var lastSetupHeaders: [String: String] = [:]
+    private var lastSetupResumeMs: Int64 = 0
+    private var lastSetupCacheMb: Int = 128
+    /// 「自动」模式下是否已经因为直连失败而回退过，避免无限重试。
+    private var didFallbackToProxy = false
+    /// 本次 setup 是否走了直连（决定出错时要不要回退）。
+    private var isUsingDirectTransport = false
+    /// 本次 setup 是否处于「ready 之前」，用于判定回退时机。
+    private var hasEverBeenReady = false
+
     #if canImport(KSPlayer)
     public let ksCoordinator = KSVideoPlayer.Coordinator()
     @Published public var ksOptions: KSOptions?
@@ -46,8 +88,25 @@ public final class VideoPlayerController: ObservableObject {
 
     public init() {}
 
-    public func setup(url: URL, headers: [String: String], resumeMs: Int64, cacheLimitMb: Int = 128) {
-        D.log("setup", "开始 url=\(url.absoluteString.prefix(120)) resumeMs=\(resumeMs) cacheMb=\(cacheLimitMb)")
+    public func setup(
+        url: URL,
+        headers: [String: String],
+        resumeMs: Int64,
+        cacheLimitMb: Int = 128,
+        forceProxy: Bool = false
+    ) {
+        // 记录参数，供「直连失败自动回退代理」使用。
+        lastSetupURL = url
+        lastSetupHeaders = headers
+        lastSetupResumeMs = max(0, resumeMs)
+        lastSetupCacheMb = cacheLimitMb
+        hasEverBeenReady = false
+        // 用户主动发起的 setup 才重置回退计数；回退自己调用的那次（forceProxy=true）不重置。
+        if !forceProxy {
+            didFallbackToProxy = false
+        }
+
+        D.log("setup", "开始 url=\(url.absoluteString.prefix(120)) resumeMs=\(resumeMs) cacheMb=\(cacheLimitMb) forceProxy=\(forceProxy)")
         D.log("setup", "请求头 keys=\(headers.keys.sorted().joined(separator: ","))")
         if let ua = headers.first(where: { $0.key.lowercased() == "user-agent" })?.value {
             D.log("setup", "服务端下发 UA=\(ua.prefix(100))")
@@ -83,19 +142,41 @@ public final class VideoPlayerController: ObservableObject {
         // 让 FFmpeg 和 AVFoundation 都不直接处理远端证书。
         playbackProxySession?.invalidate()
         playbackProxySession = nil
+
+        // 通道决策：默认「直连优先」。
+        // FFmpeg（KSMEPlayer）能靠 tls_verify=0 直连自签名 HTTPS，
+        // 而经 URLSession 代理时实测上游吞吐只有 ~50 KB/s，大文件根本来不及读 moov。
+        let transport = PlaybackTransport.current
+        let useProxyWanted: Bool = {
+            if forceProxy { return true }
+            switch transport {
+            case .proxy: return true
+            case .direct: return false
+            case .auto: return false
+            }
+        }()
+        let scheme = url.scheme?.lowercased() ?? ""
+        let proxyCapable = InsecurePlaybackProxy.isEnabled && (scheme == "http" || scheme == "https")
+
         let resolvedURL: URL
-        if InsecurePlaybackProxy.isEnabled, url.scheme?.lowercased() == "https",
+        if useProxyWanted, proxyCapable,
            let proxySession = InsecurePlaybackProxy.shared.makeSession(remoteURL: url, headers: headers)
         {
             playbackProxySession = proxySession
             resolvedURL = proxySession.localURL
+            isUsingDirectTransport = false
         } else {
             resolvedURL = url
+            isUsingDirectTransport = true
+            if useProxyWanted, !proxyCapable {
+                D.log("setup", "本想走代理但条件不满足（scheme=\(scheme) 开关=\(InsecurePlaybackProxy.isEnabled)），改为直连")
+            }
         }
         playbackURL = resolvedURL
-        D.log("setup", resolvedURL.absoluteString.hasPrefix("http://127.0.0.1")
-              ? "走回环代理 → \(resolvedURL.absoluteString.prefix(140))"
-              : "直连远端 → \(resolvedURL.absoluteString.prefix(140))")
+        D.log("setup", "通道=\(transport.rawValue)\(forceProxy ? "(强制代理)" : "") → "
+              + (isUsingDirectTransport
+                 ? "直连远端 \(resolvedURL.absoluteString.prefix(120))"
+                 : "回环代理 \(resolvedURL.absoluteString.prefix(120))"))
 
         #if canImport(KSPlayer)
         let options = KSOptions()
@@ -365,6 +446,7 @@ public final class VideoPlayerController: ObservableObject {
                 D.log("state", "\(state) 是当前图层=\(isCurrent) layerURL=\(layerURL.prefix(60))")
                 guard isCurrent else { return }
                 if state == .readyToPlay {
+                    self.hasEverBeenReady = true
                     self.isReady = true
                     self.applyVolume()
                     self.ksCoordinator.playbackRate = Float(self.playbackSpeed)
@@ -384,6 +466,7 @@ public final class VideoPlayerController: ObservableObject {
                     if self.errorMessage == nil {
                         self.errorMessage = "播放器加载失败"
                     }
+                    self.fallbackToProxyIfNeeded(reason: "state=.error")
                 }
             }
         }
@@ -438,12 +521,35 @@ public final class VideoPlayerController: ObservableObject {
                 if let err = error {
                     self.isReady = false
                     self.errorMessage = err.localizedDescription
+                    self.fallbackToProxyIfNeeded(reason: err.localizedDescription)
                 } else {
                     self.isFinished = true
                     self.onPlaybackEnded?()
                 }
             }
         }
+    }
+
+    /// 「自动」模式下，直连失败且尚未成功播放过时，自动回退到回环代理重试一次。
+    /// 这样既享受直连的高吞吐，又不会在直连不可用的环境下彻底失去播放能力。
+    private func fallbackToProxyIfNeeded(reason: String) {
+        guard isUsingDirectTransport,
+              PlaybackTransport.current == .auto,
+              !didFallbackToProxy,
+              !hasEverBeenReady,
+              let url = lastSetupURL
+        else { return }
+
+        didFallbackToProxy = true
+        let resume = currentPositionMs > 0 ? currentPositionMs : lastSetupResumeMs
+        D.log("setup", "直连失败（\(reason)），自动回退到回环代理重试，resumeMs=\(resume)")
+        setup(
+            url: url,
+            headers: lastSetupHeaders,
+            resumeMs: resume,
+            cacheLimitMb: lastSetupCacheMb,
+            forceProxy: true
+        )
     }
 
     private func applyVolume() {

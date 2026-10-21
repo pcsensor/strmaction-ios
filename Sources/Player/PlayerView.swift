@@ -357,6 +357,9 @@ public struct PlayerView: View {
                 onShowDiagnostics: {
                     ui.closeDrawer(animated: false)
                     showDiagnostics = true
+                },
+                onCycleTransport: {
+                    cycleTransportAndRestart()
                 }
             )
         }
@@ -611,6 +614,17 @@ public struct PlayerView: View {
     }
 
     // MARK: - 错误与外部工具
+
+    /// 循环切换播放通道并立即重新起播，方便对比直连与代理的吞吐差异。
+    private func cycleTransportAndRestart() {
+        let all = PlaybackTransport.allCases
+        guard let index = all.firstIndex(of: PlaybackTransport.current) else { return }
+        let next = all[(index + 1) % all.count]
+        PlaybackTransport.current = next
+        ui.closeDrawer(animated: false)
+        ui.showToast("播放通道：\(next.displayName)")
+        restartPlayback()
+    }
 
     private func restartPlayback() {
         showTimeoutAlert = false
