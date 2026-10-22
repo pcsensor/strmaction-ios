@@ -46,7 +46,7 @@ options:
   bundleIdPrefix: top.strmaction
   deploymentTarget:
     iOS: "16.0"
-  xcodeVersion: "15.4"
+  xcodeVersion: "16.0"
 
 settings:
   base:
@@ -56,6 +56,7 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.10"
     TARGETED_DEVICE_FAMILY: "1,2" # 1: iPhone, 2: iPad
+    ENABLE_BITCODE: NO
 
 packages:
   # 引入开源播放器框架 KSPlayer（基于 FFmpeg + Metal，原生支持 302 重定向维持 Header）
@@ -75,20 +76,33 @@ targets:
         product: KSPlayer
     settings:
       base:
-        ENABLE_BITCODE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # 允许后台音频播放（支持画中画与锁屏进度）
-        UIBackgroundModes: audio
+        ENABLE_BITCODE: NO
+        # 免签归档：CI 直接打包未签名 IPA
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
 ```
+
+> 后台音频（`UIBackgroundModes: audio`）与 ATS 例外声明写在 `Resources/Info.plist` 里，不在 `project.yml` 中配置。
 
 ---
 
 ## 4. GitHub Actions 云端构建流水线
 
-在 `.github/workflows/build.yml` 中配置完整的 CI 流程。每次你从 Windows 机器执行 `git push` 时，GitHub 云端就会启动一台搭载 M 系列芯片的 macOS 虚拟机自动编译并打包产物。
+在 `.github/workflows/build.yml` 中配置完整的 CI 流程。它在三种情况下启动一台搭载 M 系列芯片的 macOS 虚拟机自动编译并打包产物：
+
+| 触发 | 操作 | 说明 |
+|---|---|---|
+| **手动触发**（日常出包） | `gh workflow run build.yml --ref main`，或 Actions 页面点 "Run workflow" | 首选方式 |
+| **打标签** | `git tag v1.0.0 && git push origin v1.0.0` | 构建的同时自动创建 GitHub Release |
+| **Pull Request** | 往 main 开 PR | 每次推送 PR 分支都会再跑一遍 |
+
+> ⚠️ **普通 `git push` 到 main 不再触发构建**（2026-10 起调整）。本地推代码只更新仓库，需要出包时请用上面的手动触发或打标签。
 
 ### 4.1 流水线执行流程
-1. **环境准备**：使用 `macos-14`（配备 Xcode 15.4+）。
+1. **环境准备**：使用 `macos-14`（配备 Xcode 16.x，脚本依次探测 16.2 / 16.1 / 16.0）。
 2. **安装 XcodeGen**：通过 Homebrew 安装 `xcodegen`。
 3. **生成工程**：运行 `xcodegen generate`，根据 `project.yml` 即时生成 `StrmAction.xcodeproj`。
 4. **编译与归档**：使用 `xcodebuild archive` 进行 Release 构建（针对通用 iOS 设备 `generic/platform=iOS`）。
@@ -130,7 +144,12 @@ targets:
   2. 提交代码并推送到 GitHub (git push origin main)
                          │
                          ▼
-  3. GitHub Actions 自动拉起 macOS Runner：
+  3. 手动触发云端构建（push 本身不再自动触发）：
+     gh workflow run build.yml --ref main
+     或 Actions 页面点 "Run workflow" / 推 v* 标签
+                         │
+                         ▼
+     GitHub Actions 拉起 macOS Runner：
      • xcodegen 生成工程
      • xcodebuild 编译打包
      • 输出 StrmAction.ipa
