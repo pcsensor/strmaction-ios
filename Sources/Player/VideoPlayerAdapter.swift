@@ -79,6 +79,8 @@ public final class VideoPlayerController: ObservableObject {
     /// 网速 / 缓存区间的轮询任务。1 秒一次足够，再高频只会让 UI 白刷新。
     private var metricsTask: Task<Void, Never>?
 
+    /// FFmpeg 缓冲上限相对用户设置留的余量，避免它成为流量控制的主控（见 `refreshBufferTarget`）。
+    private static let maxBufferHeadroom: Double = 1.2
     private static let connectTimeoutSeconds: UInt64 = 20
     private static let metricsIntervalNanos: UInt64 = 1_000_000_000
 
@@ -127,7 +129,8 @@ public final class VideoPlayerController: ObservableObject {
             session = try await MediaCacheSession.start(
                 sourceURL: request.url,
                 headers: request.headers,
-                limitMb: request.diskCacheLimitMb
+                limitMb: request.diskCacheLimitMb,
+                targetAheadMb: request.bufferLimitMb
             )
         } catch {
             fail("磁盘缓存层启动失败：\(error.localizedDescription)")
@@ -419,7 +422,10 @@ public final class VideoPlayerController: ObservableObject {
         PlaybackBufferPreference.rememberBitRate(bitRate)
         let seconds = PlaybackBufferPreference.seconds(limitMb: bufferLimitMb, bitRate: bitRate)
         bufferTargetSeconds = seconds
-        activeOptions?.maxBufferDuration = seconds
+        // 交给 FFmpeg 的上限刻意留 20% 余量：流量控制由缓存层的水位主导，
+        // 这个开关只做兜底。若两者目标相同，FFmpeg 会先于我们触发 pause/resume，
+        // 下载就变成「全速 / 全停」的方波（它的判定是 >max 暂停、<max/2 才恢复）。
+        activeOptions?.maxBufferDuration = seconds * Self.maxBufferHeadroom
         D.log("buffer", "目标 \(Int(seconds))s = \(bufferLimitMb)MB @ "
             + String(format: "%.1f", bitRate / 1_000_000) + "Mbps")
     }
@@ -456,6 +462,12 @@ public final class VideoPlayerController: ObservableObject {
 
         let snapshot = session.cacheSnapshot()
         guard snapshot.totalBytes > 0, durationMs > 0 else { return }
+
+        // 把播放位置回写给缓存层：它的流量控制用「已拉取 − 已消费」当水位，
+        // 没有这个输入就判断不了预拉取是否超前。
+        let consumed = Int64(Double(currentPositionMs) / Double(durationMs) * Double(snapshot.totalBytes))
+        session.setConsumedBytes(consumed)
+
         // 字节 → 时间：整文件线性折算。
         let scale = Double(durationMs) / Double(snapshot.totalBytes)
         let mapped = snapshot.ranges.map { range in

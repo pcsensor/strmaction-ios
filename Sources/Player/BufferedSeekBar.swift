@@ -28,15 +28,18 @@ public struct BufferedSeekBar: View {
     public var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let knobDiameter: CGFloat = isDragging ? 18 : 13
             let trackHeight: CGFloat = isDragging
                 ? PlayerTheme.seekTrackHeightDragging
                 : PlayerTheme.seekTrackHeight
+            // 进度指示是一条竖线，不是圆环：竖线在已播放色块和未播放轨道上都保持高对比，
+            // 也不会像圆环那样把轨道中段盖掉一块。
+            let indicatorWidth: CGFloat = isDragging ? 5 : 3.5
+            let indicatorHeight: CGFloat = trackHeight + 10
             let lineHeight: CGFloat = isDragging
                 ? PlayerTheme.seekCacheLineHeightDragging
                 : PlayerTheme.seekCacheLineHeight
-            // 滑块中心要内缩半个直径，否则首尾位置会溢出轨道。
-            let usableWidth = max(0, width - knobDiameter)
+            // 竖线中心要内缩半个线宽，否则首尾位置会溢出轨道。
+            let usableWidth = max(0, width - indicatorWidth)
             let playedX = usableWidth * CGFloat(playedRatio)
 
             ZStack(alignment: .leading) {
@@ -48,7 +51,7 @@ public struct BufferedSeekBar: View {
                 // 2. 已播放
                 Capsule()
                     .fill(PlayerTheme.accent)
-                    .frame(width: max(0, playedX + knobDiameter / 2), height: trackHeight)
+                    .frame(width: max(0, playedX + indicatorWidth / 2), height: trackHeight)
 
                 // 3. 已缓存横线：置顶，跨过已播放色块依然可见
                 ForEach(cachedSegments) { segment in
@@ -62,20 +65,15 @@ public struct BufferedSeekBar: View {
                 // 拖动时冻结补间：手指正在定位置，任何动画都是抖动。
                 .animation(isDragging ? nil : .easeOut(duration: 0.18), value: cachedSegments)
 
-                // 4. 滑块：外环金橙 + 内芯白色，拖动时轻微放大
-                ZStack {
-                    Circle()
-                        .fill(PlayerTheme.accent)
-                        .frame(width: knobDiameter, height: knobDiameter)
-                        .shadow(color: .black.opacity(0.45), radius: 3, x: 0, y: 1)
-                    Circle()
-                        .fill(Color.white)
-                        .frame(width: max(4, knobDiameter * 0.42), height: max(4, knobDiameter * 0.42))
-                }
-                .offset(x: playedX)
-                .animation(.easeOut(duration: 0.14), value: isDragging)
-                // 只有非拖动状态才做进度补间，拖动时必须 1:1 跟手。
-                .animation(isDragging ? nil : .linear(duration: 0.12), value: playedRatio)
+                // 4. 进度指示：一条竖线，比轨道高出 10pt，便于看位置也便于拖动
+                Capsule()
+                    .fill(Color.white)
+                    .frame(width: indicatorWidth, height: indicatorHeight)
+                    .shadow(color: .black.opacity(0.55), radius: 2, x: 0, y: 0)
+                    .offset(x: playedX)
+                    .animation(.easeOut(duration: 0.14), value: isDragging)
+                    // 只有非拖动状态才做进度补间，拖动时必须 1:1 跟手。
+                    .animation(isDragging ? nil : .linear(duration: 0.12), value: playedRatio)
             }
             .frame(width: width, height: PlayerTheme.seekBarHeight)
             .contentShape(Rectangle())

@@ -19,15 +19,16 @@ enum MediaTransport {
 
         // 2. 缓冲
         //
-        //    只有 maxBufferDuration 对 MEPlayer 真实生效：
-        //    MEPlayerItem 在 loadedTime > maxBufferDuration 时暂停读取，
-        //    降到一半以下再恢复。preferredForwardBufferDuration 只被 KSAVPlayer 读取，
-        //    而这里是单一内核 KSMEPlayer，设了也是死配置。
+        //    maxBufferDuration 只有一处作用：MEPlayerItem 在 loadedTime > 它时暂停读取，
+        //    降到一半以下再恢复——是个双位开关，不是平滑控制。
+        //    真正的流量控制由缓存层的水位做（见 CacheServer 的流控），
+        //    这里刻意留 20% 余量，让这个开关只在异常时兜底，避免它成为主控造成脉冲式下载。
+        //    preferredForwardBufferDuration 只被 KSAVPlayer 读取，这里是单一内核 KSMEPlayer。
         let bufferSeconds = PlaybackBufferPreference.seconds(
             limitMb: request.bufferLimitMb,
             bitRate: PlaybackBufferPreference.observedBitRate
         )
-        options.maxBufferDuration = bufferSeconds
+        options.maxBufferDuration = bufferSeconds * 1.2
 
         // 3. 播放行为
         options.isSeekedAutoPlay = true

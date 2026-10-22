@@ -37,6 +37,8 @@ final class OriginClient {
     private let queue: DispatchQueue
     private var connection: NWConnection?
     private var cancelled = false
+    /// 被流量控制挂起时，恢复接收所需的 continuation。
+    private var resumeHandler: (() -> Void)?
 
     init(queue: DispatchQueue) {
         self.queue = queue
@@ -46,8 +48,19 @@ final class OriginClient {
         queue.async { [weak self] in
             guard let self else { return }
             self.cancelled = true
+            self.resumeHandler = nil
             self.connection?.cancel()
             self.connection = nil
+        }
+    }
+
+    /// 继续接收。由缓存在水位回落后调用。
+    func resume() {
+        queue.async { [weak self] in
+            guard let self, !self.cancelled else { return }
+            let handler = self.resumeHandler
+            self.resumeHandler = nil
+            handler?()
         }
     }
 
@@ -60,13 +73,15 @@ final class OriginClient {
         start: Int64,
         end: Int64?,
         redirectsLeft: Int = 6,
+        shouldContinue: @escaping () -> Bool,
         onMeta: @escaping (Meta) -> Void,
         onData: @escaping (Data) -> Void,
         onEnd: @escaping (Error?) -> Void
     ) {
         queue.async { [weak self] in
             self?.start(url: url, headers: headers, start: start, end: end,
-                        redirectsLeft: redirectsLeft, onMeta: onMeta, onData: onData, onEnd: onEnd)
+                        redirectsLeft: redirectsLeft, shouldContinue: shouldContinue,
+                        onMeta: onMeta, onData: onData, onEnd: onEnd)
         }
     }
 
@@ -78,6 +93,7 @@ final class OriginClient {
         start: Int64,
         end: Int64?,
         redirectsLeft: Int,
+        shouldContinue: @escaping () -> Bool,
         onMeta: @escaping (Meta) -> Void,
         onData: @escaping (Data) -> Void,
         onEnd: @escaping (Error?) -> Void
@@ -143,7 +159,7 @@ final class OriginClient {
                 self.receiveLoop(
                     connection: connection, sourceURL: url, headers: headers,
                     start: start, end: end, redirectsLeft: redirectsLeft,
-                    state: state,
+                    state: state, shouldContinue: shouldContinue,
                     onMeta: onMeta, onData: onData, onEnd: onEnd
                 )
             case .failed(let error):
@@ -172,6 +188,7 @@ final class OriginClient {
         end: Int64?,
         redirectsLeft: Int,
         state: StreamState,
+        shouldContinue: @escaping () -> Bool,
         onMeta: @escaping (Meta) -> Void,
         onData: @escaping (Data) -> Void,
         onEnd: @escaping (Error?) -> Void
@@ -218,6 +235,7 @@ final class OriginClient {
                             }
                             self.start(url: next, headers: headers, start: start, end: end,
                                        redirectsLeft: redirectsLeft - 1,
+                                       shouldContinue: shouldContinue,
                                        onMeta: onMeta, onData: onData, onEnd: onEnd)
                             return
                         }
@@ -239,13 +257,24 @@ final class OriginClient {
                 onEnd(nil)
             } else if let error {
                 onEnd(error)
-            } else {
+            } else if shouldContinue() {
                 self.receiveLoop(
                     connection: connection, sourceURL: sourceURL, headers: headers,
                     start: start, end: end, redirectsLeft: redirectsLeft,
-                    state: state,
+                    state: state, shouldContinue: shouldContinue,
                     onMeta: onMeta, onData: onData, onEnd: onEnd
                 )
+            } else {
+                // 流量控制生效：不再发起下一次 receive，TCP 接收窗口随之关闭，
+                // 源站就会停发。恢复由 `resume()` 触发。
+                self.resumeHandler = { [weak self] in
+                    self?.receiveLoop(
+                        connection: connection, sourceURL: sourceURL, headers: headers,
+                        start: start, end: end, redirectsLeft: redirectsLeft,
+                        state: state, shouldContinue: shouldContinue,
+                        onMeta: onMeta, onData: onData, onEnd: onEnd
+                    )
+                }
             }
         }
     }
