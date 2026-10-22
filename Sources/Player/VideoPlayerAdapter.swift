@@ -124,13 +124,19 @@ public final class VideoPlayerController: ObservableObject {
         //    播放地址会被换成本地 127.0.0.1：字节从这里进出，读过的位置落盘，
         //    之后 seek 回同一位置直接命中磁盘，不再回源。
         //    会话结束（destroy）整目录删除。
+        // 目标秒数要在起会话之前算：缓存层用它把「MB」换算成填充速率。
+        let aheadSeconds = PlaybackBufferPreference.seconds(
+            limitMb: request.bufferLimitMb,
+            bitRate: PlaybackBufferPreference.observedBitRate
+        )
         let session: MediaCacheSession
         do {
             session = try await MediaCacheSession.start(
                 sourceURL: request.url,
                 headers: request.headers,
                 limitMb: request.diskCacheLimitMb,
-                targetAheadMb: request.bufferLimitMb
+                targetAheadMb: request.bufferLimitMb,
+                targetAheadSeconds: aheadSeconds
             )
         } catch {
             fail("磁盘缓存层启动失败：\(error.localizedDescription)")
@@ -161,10 +167,7 @@ public final class VideoPlayerController: ObservableObject {
         setupResumeMs = request.resumeMs
         bufferLimitMb = request.bufferLimitMb
         diskCacheLimitMb = request.diskCacheLimitMb
-        bufferTargetSeconds = PlaybackBufferPreference.seconds(
-            limitMb: request.bufferLimitMb,
-            bitRate: PlaybackBufferPreference.observedBitRate
-        )
+        bufferTargetSeconds = aheadSeconds
         // 交给播放器的是本地缓存地址，不是源站地址。
         playbackURL = session.localURL
         installKSPlayerCallbacks()
@@ -387,6 +390,11 @@ public final class VideoPlayerController: ObservableObject {
 
         phase = .ready
 
+        // 到这里说明 FFmpeg 已经把容器解析完、真的开始出帧了。
+        // 之前的探测读取（可能跳到文件尾部读 moov）起点远离播放位置，
+        // 任何基于「已拉取 − 已消费」的限流都会把它们饿死，所以现在才打开。
+        cacheSession?.setPacingEnabled(true)
+
         // 轨道已经解析出来了，用真实码率把「MB → 秒」校正一次。
         refreshBufferTarget()
 
@@ -426,6 +434,8 @@ public final class VideoPlayerController: ObservableObject {
         // 这个开关只做兜底。若两者目标相同，FFmpeg 会先于我们触发 pause/resume，
         // 下载就变成「全速 / 全停」的方波（它的判定是 >max 暂停、<max/2 才恢复）。
         activeOptions?.maxBufferDuration = seconds * Self.maxBufferHeadroom
+        // 缓存层的填充速率也要跟着真实码率校正，否则限速会偏快或偏慢。
+        cacheSession?.updateTarget(aheadMb: bufferLimitMb, seconds: seconds)
         D.log("buffer", "目标 \(Int(seconds))s = \(bufferLimitMb)MB @ "
             + String(format: "%.1f", bitRate / 1_000_000) + "Mbps")
     }
@@ -467,6 +477,12 @@ public final class VideoPlayerController: ObservableObject {
         // 没有这个输入就判断不了预拉取是否超前。
         let consumed = Int64(Double(currentPositionMs) / Double(durationMs) * Double(snapshot.totalBytes))
         session.setConsumedBytes(consumed)
+
+        // 兜底打开流控：拿得到总时长就说明容器已经解析完，
+        // 探测读取阶段结束了，此后限流不会再误伤 FFmpeg。
+        if durationMs > 0 {
+            session.setPacingEnabled(true)
+        }
 
         // 字节 → 时间：整文件线性折算。
         let scale = Double(durationMs) / Double(snapshot.totalBytes)

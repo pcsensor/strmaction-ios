@@ -38,7 +38,25 @@ final class CacheServer {
     // 所以必须由我们自己做「下游消费驱动」的流量控制，否则缓冲设置形同虚设。
 
     /// 预拉取目标：已拉取但还没播到的字节维持在这个量以内（用户设置的缓冲大小）。
-    private let targetAheadBytes: Int64
+    private let targetLock = NSLock()
+    private var storedAheadBytes: Int64 = 0
+    private var storedFillRate: Double = 0
+    private var targetAheadBytes: Int64 {
+        get { targetLock.lock(); defer { targetLock.unlock() }; return storedAheadBytes }
+        set { targetLock.lock(); defer { targetLock.unlock() }; storedAheadBytes = newValue }
+    }
+    /// 达标后的填充速率（字节/秒）≈ 片源码率 × 1.15。见 `nextDecision`。
+    private var fillBytesPerSecond: Double {
+        get { targetLock.lock(); defer { targetLock.unlock() }; return storedFillRate }
+        set { targetLock.lock(); defer { targetLock.unlock() }; storedFillRate = newValue }
+    }
+    /// 流控总开关。起播与探测阶段必须关闭，理由见 `nextDecision`。
+    private let enableLock = NSLock()
+    private var storedPacingEnabled = false
+    private var pacingEnabled: Bool {
+        get { enableLock.lock(); defer { enableLock.unlock() }; return storedPacingEnabled }
+        set { enableLock.lock(); defer { enableLock.unlock() }; storedPacingEnabled = newValue }
+    }
     /// 已消费字节（播放位置折算）。由播放层定期写入。
     private let consumedLock = NSLock()
     private var storedConsumedBytes: Int64 = 0
@@ -52,6 +70,10 @@ final class CacheServer {
 
     /// 单条连接的流控状态。
     private final class Pace {
+        /// 本次回源的请求起点。水位必须相对它来算：
+        /// FFmpeg 的探测读取（非 faststart 的 MP4 要跳到文件尾部读 moov）起点远在播放位置之后，
+        /// 拿绝对偏移当水位会一上来就判定「已超前几百 MB」而把这次回源掐死。
+        var startOffset: Int64 = 0
         /// 已交给本地连接、还没被 FFmpeg 取走的字节。
         var inFlight: Int64 = 0
         /// 本次回源已写到的偏移。
@@ -59,21 +81,28 @@ final class CacheServer {
         var suspended = false
         /// 挂起时刻，用于空闲过久时主动断开。
         var suspendedAt: Date?
+        /// 上次记过的流控档位（0 全速 / 1 限速 / 2 挂起），只在切换时打日志。
+        var loggedStage: Int = -1
     }
 
-    /// 本地连接侧的在途上限。即使水位没到，也不能让 NWConnection 的发送队列无限膨胀。
-    private static let maxInFlightBytes: Int64 = 4 * 1024 * 1024
+    /// 本地连接侧的在途上限。FFmpeg 不读了就真停——这是纯本地背压，
+    /// 不依赖播放位置，因此不可能死锁（它一读，在途量下降，tick 就会恢复）。
+    private static let maxInFlightBytes: Int64 = 8 * 1024 * 1024
     /// 流控重试间隔。40ms 一次的小步呼吸，不是「全速 / 全停」的开关。
     private static let paceTickSeconds: Double = 0.04
     /// 挂起超过这个时长就断开：源站很可能已经把连接掐了，留着只是个死连接。
     private static let maxIdleSeconds: TimeInterval = 60
 
-    init(sourceURL: URL, headers: [String: String], store: RangeStore, token: String, targetAheadMb: Int) throws {
+    init(sourceURL: URL, headers: [String: String], store: RangeStore, token: String,
+         targetAheadMb: Int, targetAheadSeconds: Double) throws {
         self.sourceURL = sourceURL
         self.headers = headers
         self.store = store
         self.token = token
-        self.targetAheadBytes = Int64(max(0, targetAheadMb)) * 1_048_576
+        self.storedAheadBytes = Int64(max(0, targetAheadMb)) * 1_048_576
+        // 目标字节数 ÷ 目标秒数 = 片源字节率，再留 15% 余量跟上播放消耗。
+        let rate = targetAheadSeconds > 0 ? Double(self.storedAheadBytes) / targetAheadSeconds : 0
+        self.storedFillRate = rate > 0 ? rate * 1.15 : 1_048_576
 
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
@@ -131,16 +160,64 @@ final class CacheServer {
         consumedBytes = max(0, bytes)
     }
 
+    /// 打开/关闭预拉取流控。起播阶段由播放层关着，真正开始播放后打开。
+    func setPacingEnabled(_ enabled: Bool) {
+        pacingEnabled = enabled
+    }
+
+    /// 轨道码率出来之后校正一次目标与填充速率。
+    func updateTarget(aheadMb: Int, seconds: Double) {
+        targetAheadBytes = Int64(max(0, aheadMb)) * 1_048_576
+        let rate = seconds > 0 ? Double(targetAheadBytes) / seconds : 0
+        fillBytesPerSecond = rate > 0 ? rate * 1.15 : 1_048_576
+    }
+
     // MARK: 流量控制
 
-    /// 是否应当暂停这条连接的回源。
+    /// 收到一批之后的下一步动作。
     ///
-    /// 注意用的是**本次回源的写偏移**而不是全局最高偏移：向后 seek 到未缓存区域时，
-    /// 全局最高偏移远在播放点之后，拿它算水位会立刻判定「超前」而把这次回源掐死。
+    /// 两点与上一版不同，都是这次故障的直接教训：
+    /// 1. 水位相对**本次请求起点**算。FFmpeg 的探测读取起点可以在文件尾部，
+    ///    用绝对偏移会被瞬间判定为「已超前 700MB」。
+    /// 2. 达标后是**限速**而不是停止。停掉 receive 会让接收窗口关闭，
+    ///    源站约 3.8 秒后 RST 整条连接，FFmpeg 只能重开 Range 再被掐，死循环。
+    private func nextDecision(_ pace: Pace, chunkBytes: Int64) -> PaceDecision {
+        guard !isStopped else { return .suspend }
+
+        // FFmpeg 不读了（用户暂停、或它自己的缓冲已满）就真停。
+        // 这个条件只看本地在途量，不依赖播放位置，因此不会把探测读取饿死。
+        if pace.inFlight >= Self.maxInFlightBytes {
+            if pace.loggedStage != 2 {
+                pace.loggedStage = 2
+                D.log("cache", "本地在途 \(Self.mb(pace.inFlight))，暂停回源等下游消费")
+            }
+            return .suspend
+        }
+
+        guard pacingEnabled else { return .now }
+
+        let base = max(pace.startOffset, consumedBytes)
+        let ahead = pace.writeOffset - base
+        if ahead < targetAheadBytes {
+            if pace.loggedStage != 0 {
+                pace.loggedStage = 0
+                D.log("cache", "回源全速 已超前 \(Self.mb(ahead))/\(Self.mb(targetAheadBytes))")
+            }
+            return .now
+        }
+
+        if pace.loggedStage != 1 {
+            pace.loggedStage = 1
+            D.log("cache", "预拉取达标 \(Self.mb(ahead))，限速 "
+                + String(format: "%.2f", fillBytesPerSecond / 1_048_576) + "MB/s")
+        }
+        let seconds = Double(chunkBytes) / fillBytesPerSecond
+        return .after(min(1.0, max(0.004, seconds)))
+    }
+
+    /// 是否仍处于挂起。只用在 tick 里判断能否恢复。
     private func shouldSuspend(_ pace: Pace) -> Bool {
-        if pace.inFlight >= Self.maxInFlightBytes { return true }
-        guard targetAheadBytes > 0 else { return false }
-        return pace.writeOffset - consumedBytes >= targetAheadBytes
+        pace.inFlight >= Self.maxInFlightBytes
     }
 
     private func startPaceTickIfNeeded() {
@@ -171,6 +248,8 @@ final class CacheServer {
             if !shouldSuspend(pace) {
                 pace.suspended = false
                 pace.suspendedAt = nil
+                pace.loggedStage = 0
+                D.log("cache", "恢复回源 在途 \(Self.mb(pace.inFlight))")
                 origin.resume()
             }
         }
@@ -285,6 +364,7 @@ final class CacheServer {
         let client = OriginClient(queue: queue)
         let key = ObjectIdentifier(connection)
         let pace = Pace()
+        pace.startOffset = start
         pace.writeOffset = start
         origins[key] = client
         pacing[key] = pace
@@ -296,16 +376,16 @@ final class CacheServer {
             headers: headers,
             start: start,
             end: end,
-            // 每收一批就问一次：预拉取是否超前。超前就真的停止 receive，
-            // 内核接收窗口随之关闭，源站才会停发——这是背压能传导出去的唯一方式。
-            shouldContinue: { [weak self] in
-                guard let self, !self.isStopped else { return false }
-                if self.shouldSuspend(pace) {
+            // 每收一批就问一次下一步怎么走：全速 / 限速 / 真停。
+            // 限速是主力手段——socket 一直在排空，源站不会因为我们不读而 RST。
+            pace: { [weak self] chunkBytes in
+                guard let self else { return .suspend }
+                let decision = self.nextDecision(pace, chunkBytes: chunkBytes)
+                if case .suspend = decision {
                     self.markSuspended(pace)
                     self.startPaceTickIfNeeded()
-                    return false
                 }
-                return true
+                return decision
             },
             onMeta: { [weak self] meta in
                 guard let self, !self.isStopped else { return }
@@ -454,7 +534,8 @@ final class MediaCacheSession {
         self.store = store
     }
 
-    static func start(sourceURL: URL, headers: [String: String], limitMb: Int, targetAheadMb: Int) async throws -> MediaCacheSession {
+    static func start(sourceURL: URL, headers: [String: String], limitMb: Int,
+                      targetAheadMb: Int, targetAheadSeconds: Double) async throws -> MediaCacheSession {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("strmaction", isDirectory: true)
             .appendingPathComponent("session", isDirectory: true)
@@ -469,7 +550,8 @@ final class MediaCacheSession {
         let store = RangeStore(directory: directory, limitBytes: limitBytes)
         try store.prepare()
 
-        let server = try CacheServer(sourceURL: sourceURL, headers: headers, store: store, token: token, targetAheadMb: targetAheadMb)
+        let server = try CacheServer(sourceURL: sourceURL, headers: headers, store: store, token: token,
+                                     targetAheadMb: targetAheadMb, targetAheadSeconds: targetAheadSeconds)
         let port = try await server.start()
         guard port > 0, let localURL = URL(string: "http://127.0.0.1:\(port)/\(token)") else {
             server.stop()
@@ -489,6 +571,16 @@ final class MediaCacheSession {
     /// 回写播放位置折算出的已消费字节，供流量控制算水位。
     func setConsumedBytes(_ bytes: Int64) {
         server.setConsumedBytes(bytes)
+    }
+
+    /// 打开预拉取流控。起播与探测阶段关着，避免饿死 FFmpeg。
+    func setPacingEnabled(_ enabled: Bool) {
+        server.setPacingEnabled(enabled)
+    }
+
+    /// 用真实轨道码率校正预拉取目标与填充速率。
+    func updateTarget(aheadMb: Int, seconds: Double) {
+        server.updateTarget(aheadMb: aheadMb, seconds: seconds)
     }
 
     func stop() {

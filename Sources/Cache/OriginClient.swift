@@ -2,6 +2,21 @@ import Foundation
 import Network
 import Security
 
+/// 收到一批之后的下一步动作。
+///
+/// 之所以分三档而不是「继续 / 停止」两档：
+/// 直接停止 `receive` 会让 TCP 接收窗口关闭，源站发不出去，几秒后就把连接 RST 掉
+/// （实测这个源站约 3.8 秒）。限速这一档让 socket 保持排空，既把下载量压到码率附近，
+/// 又不会让源站认为连接已死。
+enum PaceDecision {
+    /// 立刻收下一批。
+    case now
+    /// 延迟指定秒数再收下一批，用于限速。
+    case after(TimeInterval)
+    /// 真的停止 `receive`，等 `resume()`。只在下游彻底不读时用。
+    case suspend
+}
+
 /// 回源客户端：手写 HTTP/1.1 over `NWConnection`。
 ///
 /// 为什么不用 URLSession：它会与 CDN 协商 HTTP/2，实测吞吐被流控压到 40 KB/s
@@ -73,14 +88,14 @@ final class OriginClient {
         start: Int64,
         end: Int64?,
         redirectsLeft: Int = 6,
-        shouldContinue: @escaping () -> Bool,
+        pace: @escaping (Int64) -> PaceDecision,
         onMeta: @escaping (Meta) -> Void,
         onData: @escaping (Data) -> Void,
         onEnd: @escaping (Error?) -> Void
     ) {
         queue.async { [weak self] in
             self?.start(url: url, headers: headers, start: start, end: end,
-                        redirectsLeft: redirectsLeft, shouldContinue: shouldContinue,
+                        redirectsLeft: redirectsLeft, pace: pace,
                         onMeta: onMeta, onData: onData, onEnd: onEnd)
         }
     }
@@ -93,7 +108,7 @@ final class OriginClient {
         start: Int64,
         end: Int64?,
         redirectsLeft: Int,
-        shouldContinue: @escaping () -> Bool,
+        pace: @escaping (Int64) -> PaceDecision,
         onMeta: @escaping (Meta) -> Void,
         onData: @escaping (Data) -> Void,
         onEnd: @escaping (Error?) -> Void
@@ -159,7 +174,7 @@ final class OriginClient {
                 self.receiveLoop(
                     connection: connection, sourceURL: url, headers: headers,
                     start: start, end: end, redirectsLeft: redirectsLeft,
-                    state: state, shouldContinue: shouldContinue,
+                    state: state, pace: pace,
                     onMeta: onMeta, onData: onData, onEnd: onEnd
                 )
             case .failed(let error):
@@ -188,11 +203,21 @@ final class OriginClient {
         end: Int64?,
         redirectsLeft: Int,
         state: StreamState,
-        shouldContinue: @escaping () -> Bool,
+        pace: @escaping (Int64) -> PaceDecision,
         onMeta: @escaping (Meta) -> Void,
         onData: @escaping (Data) -> Void,
         onEnd: @escaping (Error?) -> Void
     ) {
+        // 三种决策都要回到同一个入口，先做成闭包避免三份重复参数。
+        let again: () -> Void = { [weak self] in
+            self?.receiveLoop(
+                connection: connection, sourceURL: sourceURL, headers: headers,
+                start: start, end: end, redirectsLeft: redirectsLeft,
+                state: state, pace: pace,
+                onMeta: onMeta, onData: onData, onEnd: onEnd
+            )
+        }
+
         connection.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else {
                 connection.cancel()
@@ -235,7 +260,7 @@ final class OriginClient {
                             }
                             self.start(url: next, headers: headers, start: start, end: end,
                                        redirectsLeft: redirectsLeft - 1,
-                                       shouldContinue: shouldContinue,
+                                       pace: pace,
                                        onMeta: onMeta, onData: onData, onEnd: onEnd)
                             return
                         }
@@ -257,23 +282,19 @@ final class OriginClient {
                 onEnd(nil)
             } else if let error {
                 onEnd(error)
-            } else if shouldContinue() {
-                self.receiveLoop(
-                    connection: connection, sourceURL: sourceURL, headers: headers,
-                    start: start, end: end, redirectsLeft: redirectsLeft,
-                    state: state, shouldContinue: shouldContinue,
-                    onMeta: onMeta, onData: onData, onEnd: onEnd
-                )
             } else {
-                // 流量控制生效：不再发起下一次 receive，TCP 接收窗口随之关闭，
-                // 源站就会停发。恢复由 `resume()` 触发。
-                self.resumeHandler = { [weak self] in
-                    self?.receiveLoop(
-                        connection: connection, sourceURL: sourceURL, headers: headers,
-                        start: start, end: end, redirectsLeft: redirectsLeft,
-                        state: state, shouldContinue: shouldContinue,
-                        onMeta: onMeta, onData: onData, onEnd: onEnd
-                    )
+                switch pace(Int64(data?.count ?? 0)) {
+                case .now:
+                    again()
+                case .after(let seconds):
+                    self.queue.asyncAfter(deadline: .now() + seconds) { [weak self] in
+                        guard let self, !self.cancelled else { return }
+                        again()
+                    }
+                case .suspend:
+                    // 流量控制生效：不再发起下一次 receive，TCP 接收窗口随之关闭，
+                    // 源站就会停发。恢复由 `resume()` 触发。
+                    self.resumeHandler = again
                 }
             }
         }
