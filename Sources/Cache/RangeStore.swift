@@ -67,6 +67,16 @@ final class RangeStore {
         return coveredBytes
     }
 
+    /// 已落盘区间的快照（升序、互不重叠、已合并）。
+    ///
+    /// 给 UI 用：进度条上的「已缓存横线」就是这些区间按字节比例折算出来的，
+    /// 播放头背后哪些段落过盘、seek 之后留下的空洞，都能看出来。
+    func snapshot() -> [Range<Int64>] {
+        lock.lock()
+        defer { lock.unlock() }
+        return ranges
+    }
+
     // MARK: 写入 / 读取
 
     /// 写入一段数据，返回是否真的落盘（超过容量上限时返回 false，调用方仍应继续转发）。

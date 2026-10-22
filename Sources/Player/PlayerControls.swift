@@ -101,7 +101,7 @@ struct PlayerBottomBar: View {
             BufferedSeekBar(
                 currentMs: displayedPositionMs,
                 durationMs: player.durationMs,
-                bufferedMs: player.bufferedPositionMs,
+                cachedSegments: player.cachedSegments,
                 onSeek: { target in
                     player.seek(toMs: target)
                     ui.resetAutoHide()
@@ -141,7 +141,17 @@ struct PlayerBottomBar: View {
                     action: onNext
                 )
 
-                timeLabel
+                // 网速来自缓存层的回源统计：FFmpeg 只连本机，它看不到真实下载速度。
+                HStack(spacing: 6) {
+                    timeLabel
+                    if player.isDownloading {
+                        Text(PlayerTimeFormat.networkSpeed(bytesPerSecond: player.networkSpeedBps))
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(PlayerTheme.textMuted)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
+                }
 
                 Spacer(minLength: 6)
 

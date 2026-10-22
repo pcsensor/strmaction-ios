@@ -22,8 +22,9 @@ enum PlayerTheme {
     static let panelRaised = Color(hex: "#1B1F2B")
     static let hairline = Color.white.opacity(0.10)
 
-    static let trackUnplayed = Color.white.opacity(0.24)
-    static let trackBuffered = Color.white.opacity(0.72)
+    static let trackUnplayed = Color.white.opacity(0.22)
+    /// 已缓存横线：画在最上层，跨过金橙播放区时依然要看得见。
+    static let trackCacheLine = Color.white.opacity(0.92)
 
     static let pillBackground = Color.white.opacity(0.16)
     static let itemBackground = Color.white.opacity(0.07)
@@ -46,8 +47,13 @@ enum PlayerTheme {
     static let pillButtonHeight: CGFloat = 30
     static let centerButtonSize: CGFloat = 56
     static let lockButtonSize: CGFloat = 44
-    static let seekBarHeight: CGFloat = 28
-    static let seekTrackHeight: CGFloat = 5
+    /// 触摸区高度：比轨道高得多，手指不必精准点在细条上。
+    static let seekBarHeight: CGFloat = 32
+    static let seekTrackHeight: CGFloat = 12
+    static let seekTrackHeightDragging: CGFloat = 16
+    /// 已缓存横线的粗细。必须明显细于轨道，才不会把「已播放」的色块吃掉。
+    static let seekCacheLineHeight: CGFloat = 2.5
+    static let seekCacheLineHeightDragging: CGFloat = 3.5
     static let topBarPadding = EdgeInsets(top: 10, leading: 12, bottom: 8, trailing: 12)
     static let bottomBarPadding = EdgeInsets(top: 6, leading: 14, bottom: 12, trailing: 14)
     static let topBarGradientHeight: CGFloat = 96
@@ -156,6 +162,15 @@ enum PlayerTimeFormat {
 
     static func speedCompact(_ value: Double) -> String {
         abs(value.rounded() - value) < 0.001 ? String(format: "%.0fx", value) : String(format: "%.1fx", value)
+    }
+
+    /// 网速。MB/s 保留一位小数，KB/s 取整——UI 上不需要「832.47 KB/s」这种精度。
+    static func networkSpeed(bytesPerSecond: Double) -> String {
+        let bytes = max(0, bytesPerSecond)
+        if bytes >= 1_048_576 {
+            return String(format: "%.1f MB/s", bytes / 1_048_576)
+        }
+        return String(format: "%.0f KB/s", bytes / 1024)
     }
 }
 

@@ -3,6 +3,17 @@ import AVFoundation
 import Combine
 import KSPlayer
 
+/// 已落盘区间在时间轴上的投影。
+///
+/// 字节区间 → 时间区间是按「总字节 : 总时长」线性折算的（MP4 的 mdat 里音视频交错，
+/// 偏差通常在百分之几），对进度条上的缓存指示足够用，不值得为它去解 stts 表。
+public struct CachedSegment: Hashable, Identifiable {
+    public let startMs: Int64
+    public let endMs: Int64
+
+    public var id: Int64 { startMs }
+}
+
 /// 播放引擎适配层。
 ///
 /// 设计约束（不可放宽）：
@@ -25,6 +36,10 @@ public final class VideoPlayerController: ObservableObject {
     @Published public private(set) var bufferTargetSeconds: Double = PlaybackBufferPreference.secondsForCurrentLimit()
     /// 本次会话的磁盘缓存上限（MB）。
     @Published public private(set) var diskCacheLimitMb: Int = DiskCachePreference.defaultLimitMb
+    /// 实时回源速度（字节/秒）。只有真正走网络的字节计入，磁盘命中为 0。
+    @Published public private(set) var networkSpeedBps: Double = 0
+    /// 已落盘区间（时间轴），进度条上的缓存横线画它。
+    @Published public private(set) var cachedSegments: [CachedSegment] = []
     @Published public var playbackSpeed: Double = 1.0
     @Published public var isAspectFill: Bool = false
     @Published public private(set) var errorMessage: String?
@@ -38,6 +53,11 @@ public final class VideoPlayerController: ObservableObject {
     public var onPlaybackEnded: (() -> Void)?
 
     public var isReady: Bool { phase == .ready }
+
+    /// 低于这个速度视为「没有在下载」，UI 不再显示数字，避免静止时来回抖。
+    private static let networkSpeedFloor: Double = 20 * 1024
+
+    public var isDownloading: Bool { networkSpeedBps >= Self.networkSpeedFloor }
 
     // MARK: 内部
 
@@ -56,8 +76,11 @@ public final class VideoPlayerController: ObservableObject {
     private var cacheSession: MediaCacheSession?
     /// 诊断节流：上次记录过的播放秒数。
     private var lastDiagnosticSecond: Int64 = -1
+    /// 网速 / 缓存区间的轮询任务。1 秒一次足够，再高频只会让 UI 白刷新。
+    private var metricsTask: Task<Void, Never>?
 
     private static let connectTimeoutSeconds: UInt64 = 20
+    private static let metricsIntervalNanos: UInt64 = 1_000_000_000
 
     public init() {}
 
@@ -112,6 +135,7 @@ public final class VideoPlayerController: ObservableObject {
         }
         cacheSession?.stop()
         cacheSession = session
+        startMetricsTask()
 
         // 3. 选项
         let options = MediaTransport.makeOptions(for: request)
@@ -400,6 +424,52 @@ public final class VideoPlayerController: ObservableObject {
             + String(format: "%.1f", bitRate / 1_000_000) + "Mbps")
     }
 
+    // MARK: - 网速 / 缓存区间
+
+    /// 每秒刷新一次「实时网速」和「已落盘区间」。
+    ///
+    /// 网速只能由缓存层统计：FFmpeg 现在只连 127.0.0.1，它看到的永远是本地速度。
+    private func startMetricsTask() {
+        metricsTask?.cancel()
+        metricsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.metricsIntervalNanos)
+                guard !Task.isCancelled else { break }
+                self?.refreshMetrics()
+            }
+        }
+    }
+
+    private func stopMetricsTask() {
+        metricsTask?.cancel()
+        metricsTask = nil
+    }
+
+    private func refreshMetrics() {
+        guard let session = cacheSession else {
+            networkSpeedBps = 0
+            cachedSegments = []
+            return
+        }
+
+        networkSpeedBps = session.throughputSampler.bytesPerSecond()
+
+        let snapshot = session.cacheSnapshot()
+        guard snapshot.totalBytes > 0, durationMs > 0 else { return }
+        // 字节 → 时间：整文件线性折算。
+        let scale = Double(durationMs) / Double(snapshot.totalBytes)
+        let mapped = snapshot.ranges.map { range in
+            CachedSegment(
+                startMs: min(durationMs, Int64(Double(range.lowerBound) * scale)),
+                endMs: min(durationMs, Int64(Double(range.upperBound) * scale))
+            )
+        }
+        // 只在真的变了才发：否则每秒一次的无意义刷新会让进度条白白重绘。
+        if mapped != cachedSegments {
+            cachedSegments = mapped
+        }
+    }
+
     private func fail(_ reason: String) {
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
@@ -427,12 +497,15 @@ public final class VideoPlayerController: ObservableObject {
     // MARK: - 生命周期
 
     private func resetState() {
+        stopMetricsTask()
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
         isPlaying = false
         currentPositionMs = 0
         durationMs = 0
         bufferedPositionMs = 0
+        networkSpeedBps = 0
+        cachedSegments = []
         activeOptions = nil
         isPiPActive = false
         subtitleText = nil
@@ -443,6 +516,7 @@ public final class VideoPlayerController: ObservableObject {
     /// 释放播放器。调用后 `phase` 回到 `.idle`。
     public func destroy() {
         D.log("engine", "destroy")
+        stopMetricsTask()
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
         resetState()

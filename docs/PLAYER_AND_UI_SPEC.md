@@ -17,7 +17,7 @@
 | `Player/PlayerControls.swift` | `PlayerTopBar` / `PlayerBottomBar` / `PlayerCenterButton` / `PlayerLockEntryButton` / `PlayerLockButton` |
 | `Player/PlayerOverlays.swift` | `PlayerCenterBadgeView`（居中浮层）/ `PlayerSpeedBadgeView` / `PlayerBufferingView` / `PlayerErrorOverlay` / `PlayerAutoNextOverlay` |
 | `Player/PlayerDrawerView.swift` | `PlayerDrawerView`（抽屉外壳）+ 行组件 + `PlayerDrawerContent`（菜单/选集/倍速/字幕内容） |
-| `Player/BufferedSeekBar.swift` | 三层缓冲进度条 |
+| `Player/BufferedSeekBar.swift` | 加宽轨道 + 已缓存中线（多段）的进度条 |
 | `Player/PlayerView.swift` | 编排层：ZStack 层级、生命周期、进度上报、远程控制 |
 | `Player/VideoPlayerAdapter.swift` | `VideoPlayerController`（KSPlayer / AVPlayer 双内核）与渲染视图 |
 
@@ -69,8 +69,9 @@
 │              ┌────────────────┐                        │
 │              │ ☀ 亮度   62%   │  ← 居中浮层（不跟手）   │
 │              └────────────────┘                        │
-│ ────────────────────────●───────────────────────────── │  ← BufferedSeekBar
-│ [▶/⏸] [⏮] [⏭]  03:15 / 48:20        [选集][倍速][⛶]   │  ← BottomBar
+│ ════════════╪══════════════════════════════════════════ │  ← BufferedSeekBar
+│              ╎上：已缓存中线（多段，含播放头背后）      │     下：已播放金橙
+│ [▶/⏸] [⏮] [⏭]  03:15 / 48:20 · 2.4 MB/s  [选集][倍速][⛶]│  ← BottomBar
 └────────────────────────────────────────────────────────┘
 ```
 

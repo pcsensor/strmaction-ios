@@ -17,7 +17,16 @@ final class CacheServer {
     /// 本地端口的随机路径前缀，避免同网段其他人直接拉到缓存内容。
     private let token: String
     /// 源文件总长度。第一次回源从 `Content-Range` 拿到，后续 seek 直接复用。
-    private var totalLength: Int64 = -1
+    ///
+    /// 会在缓存队列上写、在主线程（UI 取缓存区间）上读，所以用锁包一层。
+    private let metaLock = NSLock()
+    private var storedTotalLength: Int64 = -1
+    private var totalLength: Int64 {
+        get { metaLock.lock(); defer { metaLock.unlock() }; return storedTotalLength }
+        set { metaLock.lock(); defer { metaLock.unlock() }; storedTotalLength = newValue }
+    }
+    /// 回源吞吐采样。只统计真正走网络的字节，UI 的「实时网速」读它。
+    let throughput = ThroughputSampler()
     /// 每个本地连接对应的回源客户端，连接断开时一并取消，避免僵尸下载。
     private var origins: [ObjectIdentifier: OriginClient] = [:]
     private var isStopped = false
@@ -66,6 +75,13 @@ final class CacheServer {
             self.origins.removeAll()
             self.store.close()
         }
+    }
+
+    /// 给 UI 的只读快照：已落盘区间 + 源文件总长度。
+    ///
+    /// UI 拿这两个值把字节区间折算成时间区间，画进度条上的缓存横线。
+    func cacheSnapshot() -> (ranges: [Range<Int64>], totalBytes: Int64) {
+        return (store.snapshot(), totalLength)
     }
 
     // MARK: 连接处理
@@ -216,6 +232,7 @@ final class CacheServer {
                         if error != nil { self.cancelOrigin(for: connection) }
                     })
                 }
+                self.throughput.add(Int64(data.count))
                 self.store.write(data, at: writeOffset)
                 writeOffset += Int64(data.count)
                 forwarded += Int64(data.count)
@@ -343,6 +360,13 @@ final class MediaCacheSession {
         }
         D.log("cache", "会话就绪 端口=\(port) 上限=\(limitMb)MB 源=\(sourceURL.host ?? "-")")
         return MediaCacheSession(localURL: localURL, server: server, directory: directory, store: store)
+    }
+
+    /// 回源吞吐采样器（只读）。
+    var throughputSampler: ThroughputSampler { server.throughput }
+    /// 已落盘区间 + 源文件总长度，供进度条画缓存横线。
+    func cacheSnapshot() -> (ranges: [Range<Int64>], totalBytes: Int64) {
+        server.cacheSnapshot()
     }
 
     func stop() {
